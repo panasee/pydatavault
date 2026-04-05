@@ -121,10 +121,6 @@ pyflexlab environment variables (`PYLAB_DB_OUT`, `PYLAB_DB_LOCAL`) should be con
 
 ```
 {PROJECT}-{description}-{YYYYMM}
-
-CISS-30degLH-tMoTe-202411
-JJ-NbSeCSB3-202512
-TNS-sample1-202506
 ```
 
 The same ID is used for the fabrication folder, the measurement folder, and the database record, making the correspondence unambiguous across all three locations.
