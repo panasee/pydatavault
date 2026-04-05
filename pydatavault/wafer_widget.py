@@ -539,9 +539,11 @@ class CoordTransformDialog(QDialog):
         return result
 
     @staticmethod
-    def _fmt_info(info: dict) -> str:
+    def _fmt_transform(info: dict, label: str = "") -> str:
         dx, dy = info["displacement"]
+        prefix = f"{label}:  " if label else ""
         return (
+            f"{prefix}"
             f"dx = {dx:.4f},  dy = {dy:.4f},  "
             f"θ = {info['rotation_deg']:.4f}°,  "
             f"scale = {info['scale']:.6f}"
@@ -573,12 +575,10 @@ class CoordTransformDialog(QDialog):
             info = coord_utils.compute_transform_info(
                 old_of(i0), c0, old_of(i1), c1
             )
-            text = (
-                f"Using Ref {i0 + 1} + Ref {i1 + 1}:\n"
-                f"  {self._fmt_info(info)}"
-            )
+            text = self._fmt_transform(info, f"Ref {i0+1}+{i1+1}")
+
         else:
-            # 3 points — compute two independent pairs and show deviation
+            # 3 points — two independent estimates + reliability indicators
             i0, c0 = filled[0]
             i1, c1 = filled[1]
             i2, c2 = filled[2]
@@ -588,16 +588,17 @@ class CoordTransformDialog(QDialog):
             infoBC = coord_utils.compute_transform_info(
                 old_of(i1), c1, old_of(i2), c2
             )
-            ddx   = abs(infoAB["displacement"][0] - infoBC["displacement"][0])
-            ddy   = abs(infoAB["displacement"][1] - infoBC["displacement"][1])
-            dang  = abs(infoAB["rotation_deg"]    - infoBC["rotation_deg"])
-            dscl  = abs(infoAB["scale"]           - infoBC["scale"])
+            ddx  = abs(infoAB["displacement"][0] - infoBC["displacement"][0])
+            ddy  = abs(infoAB["displacement"][1] - infoBC["displacement"][1])
+            dang = abs(infoAB["rotation_deg"]    - infoBC["rotation_deg"])
             text = (
-                f"Ref {i0+1}+{i1+1}:  {self._fmt_info(infoAB)}\n"
-                f"Ref {i1+1}+{i2+1}:  {self._fmt_info(infoBC)}\n"
+                f"{self._fmt_transform(infoAB, f'Ref {i0+1}+{i1+1}')}\n"
+                f"{self._fmt_transform(infoBC, f'Ref {i1+1}+{i2+1}')}\n"
                 f"Deviation:  "
-                f"Δdx = {ddx:.4f},  Δdy = {ddy:.4f},  "
-                f"Δθ = {dang:.4f}°,  Δscale = {dscl:.6f}"
+                f"Δdx = {ddx:.4f},  Δdy = {ddy:.4f},  Δθ = {dang:.4f}°\n"
+                f"Scale:  "
+                f"s({i0+1},{i1+1}) = {infoAB['scale']:.6f},  "
+                f"s({i1+1},{i2+1}) = {infoBC['scale']:.6f}"
             )
 
         self._params_label.setText(text)

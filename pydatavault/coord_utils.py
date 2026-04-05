@@ -55,38 +55,36 @@ def compute_transform_info(
     ref1: tuple, ref1_new: tuple,
     ref2: tuple, ref2_new: tuple,
 ) -> dict:
-    """Compute transform parameters matching pyflexlab's Flakes.coor_transition.
+    """Compute parameters of the full 2-D similarity transform z_new = a*z_old + b.
 
-    pyflexlab's algorithm is a *pure-rotation* transform (no scale applied to
-    the target point):
-        rot  = unit(rel_new) / unit(rel_old)   # |rot| == 1
-        out  = (target - ref1) * rot + ref1_new
+    Two reference points uniquely determine all 4 degrees of freedom:
+        translation  (dx, dy)  — 2 DOF  → from b = z1_new - a*z1_old
+        rotation     θ         — 1 DOF  → arg(a)
+        uniform scale s        — 1 DOF  → |a|
 
-    The parameters reported here are therefore:
-
-        displacement  -- (ref1_new[0] - ref1[0], ref1_new[1] - ref1[1])
-                         i.e. the Cartesian shift of the first reference point,
-                         consistent with pyflexlab's own diagnostic print.
-        rotation_deg  -- angle of `rot` in degrees (counter-clockwise positive),
-                         identical to np.angle(rot)*180/pi in pyflexlab.
-        scale         -- dist_new / dist_old (length ratio between the two
-                         reference segments); used as a diagnostic — values
-                         far from 1.0 indicate a magnification mismatch.
+    Returns:
+        displacement  -- (b.real, b.imag): translational component of the
+                         transform (image of the old-system origin).
+        rotation_deg  -- arg(a) in degrees, counter-clockwise positive.
+        scale         -- |a| = dist_new / dist_old.  Values close to 1 mean
+                         the two coordinate systems share the same scale;
+                         deviations indicate a magnification difference.
     """
-    rel_old = complex(ref2[0] - ref1[0], ref2[1] - ref1[1])
-    rel_new = complex(ref2_new[0] - ref1_new[0], ref2_new[1] - ref1_new[1])
-    dist_old = abs(rel_old)
-    dist_new = abs(rel_new)
+    z1_old = complex(ref1[0],     ref1[1])
+    z2_old = complex(ref2[0],     ref2[1])
+    z1_new = complex(ref1_new[0], ref1_new[1])
+    z2_new = complex(ref2_new[0], ref2_new[1])
 
-    if dist_old == 0:
+    dz_old = z2_old - z1_old
+    if abs(dz_old) == 0:
         return {"scale": 1.0, "rotation_deg": 0.0,
                 "displacement": (ref1_new[0] - ref1[0], ref1_new[1] - ref1[1])}
 
-    # Pure-rotation factor (unit vector ratio), same as pyflexlab
-    rot = (rel_new / dist_new) / (rel_old / dist_old)
+    a = (z2_new - z1_new) / dz_old   # complex: encodes scale + rotation
+    b = z1_new - a * z1_old           # complex: translational offset
 
     return {
-        "scale": dist_new / dist_old,
-        "rotation_deg": math.degrees(math.atan2(rot.imag, rot.real)),
-        "displacement": (ref1_new[0] - ref1[0], ref1_new[1] - ref1[1]),
+        "scale": abs(a),
+        "rotation_deg": math.degrees(math.atan2(a.imag, a.real)),
+        "displacement": (b.real, b.imag),
     }
