@@ -43,22 +43,22 @@ PyDataVault requires the following environment variables to be set before launch
 
 | Variable | Required | Owner | Purpose |
 |---|:---:|---|---|
-| `DONGKAI_DB_PATH` | ✅ | PyDataVault | Root directory for the project tree, shared flake library, and SQLite database |
-| `PYLAB_DB_OUT` | ✅ | pyflexlab | Measurement data output directory. May live on a different drive or machine from `DONGKAI_DB_PATH`. Resolved via pyflexlab's own `set_envs()` logic, which also supports machine-specific variants such as `PYLAB_DB_OUT_<HOSTNAME>` |
+| `VAULT_DB_PATH` | ✅ | PyDataVault | Root directory for the project tree, shared flake library, and SQLite database |
+| `PYLAB_DB_OUT` | ✅ | pyflexlab | Measurement data output directory. May live on a different drive or machine from `VAULT_DB_PATH`. Resolved via pyflexlab's own `set_envs()` logic, which also supports machine-specific variants such as `PYLAB_DB_OUT_<HOSTNAME>` |
 | `PYLAB_DB_LOCAL` | ✅ | pyflexlab | Local configuration directory containing `measure_types.json` and notebook templates used by `pyflexlab.FileOrganizer` |
 | `PYLAB_LOCAL_SPECIFIC` | ☑️ optional | pyflexlab | Machine-specific override for `PYLAB_DB_LOCAL`. When both `PYLAB_LOCAL_SPECIFIC` and `PYLAB_OUT_SPECIFIC` are set, pyflexlab uses them directly and skips `set_envs()` |
 | `PYLAB_OUT_SPECIFIC` | ☑️ optional | pyflexlab | Machine-specific override for `PYLAB_DB_OUT` (see above) |
 
-> `PYLAB_DB_OUT` and `DONGKAI_DB_PATH` are **completely independent** paths and should not be assumed to share any common parent directory.
+> `PYLAB_DB_OUT` and `VAULT_DB_PATH` are **completely independent** paths and should not be assumed to share any common parent directory.
 
 ---
 
 ## Data directory layout
 
-`DONGKAI_DB_PATH` contains the PyDataVault-managed tree:
+`VAULT_DB_PATH` contains the PyDataVault-managed tree:
 
 ```
-$DONGKAI_DB_PATH/
+$VAULT_DB_PATH/
 ├── .labdb/
 │   └── lab.db                  ← SQLite metadata database
 ├── projects/
@@ -103,10 +103,10 @@ Requires Python ≥ 3.10. `pyflexlab` and `pyomnix` are listed as dependencies a
 
 ```bash
 # Windows
-set DONGKAI_DB_PATH=D:\path\to\data
+set VAULT_DB_PATH=D:\path\to\data
 
 # macOS / Linux
-export DONGKAI_DB_PATH=/path/to/data
+export VAULT_DB_PATH=/path/to/data
 
 pydatavault          # via entry point
 # or

@@ -5,8 +5,8 @@ from pathlib import Path
 
 
 def get_root_path() -> Path:
-    """Get the PyDataVault root path from DONGKAI_DB_PATH, or a local fallback."""
-    env_path = os.environ.get("DONGKAI_DB_PATH")
+    """Get the PyDataVault root path from VAULT_DB_PATH, or a local fallback."""
+    env_path = os.environ.get("VAULT_DB_PATH")
     if env_path:
         return Path(env_path)
     fallback = Path(__file__).parent.parent / "db_test"
