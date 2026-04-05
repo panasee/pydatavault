@@ -408,134 +408,236 @@ class RefPointsDialog(QDialog):
 
 
 class CoordTransformDialog(QDialog):
-    """Dialog for transforming coordinates using reference points."""
+    """Coordinate-system transformation dialog.
 
-    def __init__(self, ref_points: List[dict], parent=None,
-                 target: tuple | None = None):
+    Displays the ref points stored for a wafer (up to 3).  The user types
+    the corresponding coordinates measured in the *new* coordinate system
+    (e.g. SEM stage) into the input fields on the right.
+
+    Behaviour
+    ---------
+    * Inputs are QLineEdit so they can be left empty ("not yet measured").
+    * As soon as **2** slots are filled the transform parameters
+      (translation dx/dy and rotation θ) are shown immediately.
+    * When all **3** slots are filled, two independent estimates are
+      computed (using pairs 1-2 and 2-3) and their deviation is shown as a
+      reliability indicator.
+    * Selecting a flake from the combo box displays its transformed
+      new-system coordinates (always using the first two filled-in points).
+    * Nothing is written to the database — all results are temporary.
+    """
+
+    def __init__(self, ref_points: list[dict], flakes: list[dict],
+                 parent=None):
         super().__init__(parent)
         self.ref_points = ref_points
-        self._prefill_target = target
+        self.flakes = flakes
         self.setWindowTitle("Coordinate Transform")
-        self.setGeometry(100, 100, 600, 400)
+        self.setMinimumWidth(660)
+        self._build_ui()
 
-        layout = QVBoxLayout()
+    # ------------------------------------------------------------------ #
+    #  UI construction                                                     #
+    # ------------------------------------------------------------------ #
 
-        layout.addWidget(QLabel("Select 2 Reference Points:"))
+    def _build_ui(self):
+        outer = QVBoxLayout(self)
+        outer.setSpacing(12)
 
-        # Reference point selectors
-        ref_layout = QHBoxLayout()
-        ref_layout.addWidget(QLabel("Ref Point 1:"))
-        self.ref1_combo = QComboBox()
-        for i, rp in enumerate(ref_points):
-            self.ref1_combo.addItem(f"Point {i+1} ({rp.get('x', 0)}, {rp.get('y', 0)})", i)
-        ref_layout.addWidget(self.ref1_combo)
+        # ── Ref-point input table ─────────────────────────────────────
+        outer.addWidget(QLabel(
+            "<b>Reference Points</b> — type the new-system coordinates "
+            "next to each point that you have re-measured:"
+        ))
 
-        ref_layout.addWidget(QLabel("Ref Point 2:"))
-        self.ref2_combo = QComboBox()
-        for i, rp in enumerate(ref_points):
-            self.ref2_combo.addItem(f"Point {i+1} ({rp.get('x', 0)}, {rp.get('y', 0)})", i)
-        if len(ref_points) > 1:
-            self.ref2_combo.setCurrentIndex(1)
-        ref_layout.addWidget(self.ref2_combo)
-        layout.addLayout(ref_layout)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        for col, text in enumerate(["", "Old X", "Old Y", "→", "New X", "New Y"]):
+            lbl = QLabel(f"<b>{text}</b>" if text else "")
+            lbl.setAlignment(Qt.AlignCenter)
+            grid.addWidget(lbl, 0, col)
 
-        # New coordinates for reference points
-        layout.addWidget(QLabel("New Reference Coordinates:"))
+        self._new_x_edits: list[QLineEdit] = []
+        self._new_y_edits: list[QLineEdit] = []
+        for i, rp in enumerate(self.ref_points):
+            grid.addWidget(QLabel(f"Ref {i + 1}"), i + 1, 0)
+            grid.addWidget(QLabel(f"{rp.get('x', 0):.4f}"), i + 1, 1)
+            grid.addWidget(QLabel(f"{rp.get('y', 0):.4f}"), i + 1, 2)
+            grid.addWidget(QLabel("→"), i + 1, 3)
+            xe = QLineEdit()
+            xe.setPlaceholderText("x")
+            xe.setFixedWidth(110)
+            ye = QLineEdit()
+            ye.setPlaceholderText("y")
+            ye.setFixedWidth(110)
+            xe.textChanged.connect(self._on_input_changed)
+            ye.textChanged.connect(self._on_input_changed)
+            grid.addWidget(xe, i + 1, 4)
+            grid.addWidget(ye, i + 1, 5)
+            self._new_x_edits.append(xe)
+            self._new_y_edits.append(ye)
 
-        new_ref_layout = QHBoxLayout()
-        new_ref_layout.addWidget(QLabel("Ref 1 new X:"))
-        self.ref1_new_x = QDoubleSpinBox()
-        self.ref1_new_x.setRange(-10000, 10000)
-        self.ref1_new_x.setSingleStep(0.1)
-        new_ref_layout.addWidget(self.ref1_new_x)
+        outer.addLayout(grid)
 
-        new_ref_layout.addWidget(QLabel("Ref 1 new Y:"))
-        self.ref1_new_y = QDoubleSpinBox()
-        self.ref1_new_y.setRange(-10000, 10000)
-        self.ref1_new_y.setSingleStep(0.1)
-        new_ref_layout.addWidget(self.ref1_new_y)
-        layout.addLayout(new_ref_layout)
+        # ── Transform parameters ──────────────────────────────────────
+        outer.addWidget(QLabel("<b>Transform Parameters</b>:"))
+        self._params_label = QLabel(
+            "(fill in at least 2 reference points above)"
+        )
+        self._params_label.setWordWrap(True)
+        self._params_label.setStyleSheet(
+            "background:#f5f5f5; padding:8px; border-radius:4px;"
+        )
+        self._params_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        outer.addWidget(self._params_label)
 
-        new_ref2_layout = QHBoxLayout()
-        new_ref2_layout.addWidget(QLabel("Ref 2 new X:"))
-        self.ref2_new_x = QDoubleSpinBox()
-        self.ref2_new_x.setRange(-10000, 10000)
-        self.ref2_new_x.setSingleStep(0.1)
-        new_ref2_layout.addWidget(self.ref2_new_x)
+        # ── Flake picker ──────────────────────────────────────────────
+        outer.addWidget(QLabel("<b>Flake Coordinates</b>:"))
+        flake_row = QHBoxLayout()
+        flake_row.addWidget(QLabel("Flake:"))
+        self._flake_combo = QComboBox()
+        self._flake_combo.addItem("— select —", None)
+        for fl in self.flakes:
+            label = (
+                f"{fl['flake_id']}  "
+                f"({fl.get('coord_x', 0):.3f}, {fl.get('coord_y', 0):.3f})"
+            )
+            self._flake_combo.addItem(label, fl)
+        self._flake_combo.currentIndexChanged.connect(self._on_flake_changed)
+        flake_row.addWidget(self._flake_combo, 1)
+        outer.addLayout(flake_row)
 
-        new_ref2_layout.addWidget(QLabel("Ref 2 new Y:"))
-        self.ref2_new_y = QDoubleSpinBox()
-        self.ref2_new_y.setRange(-10000, 10000)
-        self.ref2_new_y.setSingleStep(0.1)
-        new_ref2_layout.addWidget(self.ref2_new_y)
-        layout.addLayout(new_ref2_layout)
+        self._flake_result_label = QLabel("(no flake selected)")
+        self._flake_result_label.setWordWrap(True)
+        self._flake_result_label.setStyleSheet(
+            "background:#f0f8ff; padding:8px; border-radius:4px;"
+        )
+        self._flake_result_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        outer.addWidget(self._flake_result_label)
 
-        # Target point
-        layout.addWidget(QLabel("Target Point (original coordinates):"))
-        target_layout = QHBoxLayout()
-        target_layout.addWidget(QLabel("X:"))
-        self.target_x = QDoubleSpinBox()
-        self.target_x.setRange(-1e9, 1e9)
-        self.target_x.setDecimals(4)
-        self.target_x.setSingleStep(0.1)
-        if target is not None:
-            self.target_x.setValue(target[0])
-        target_layout.addWidget(self.target_x)
-
-        target_layout.addWidget(QLabel("Y:"))
-        self.target_y = QDoubleSpinBox()
-        self.target_y.setRange(-1e9, 1e9)
-        self.target_y.setDecimals(4)
-        self.target_y.setSingleStep(0.1)
-        if target is not None:
-            self.target_y.setValue(target[1])
-        target_layout.addWidget(self.target_y)
-        layout.addLayout(target_layout)
-
-        # Result
-        layout.addWidget(QLabel("Transformed Result:"))
-        self.result_label = QLabel("(pending)")
-        self.result_label.setStyleSheet("background-color: #f0f0f0; padding: 10px;")
-        layout.addWidget(self.result_label)
-
-        # Compute button
-        compute_btn = QPushButton("Compute Transform")
-        compute_btn.clicked.connect(self.compute_transform)
-        layout.addWidget(compute_btn)
-
-        layout.addStretch()
-
-        # Close button
+        outer.addStretch()
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.accept)
-        layout.addWidget(close_btn)
+        outer.addWidget(close_btn)
 
-        self.setLayout(layout)
+    # ------------------------------------------------------------------ #
+    #  Helpers                                                             #
+    # ------------------------------------------------------------------ #
 
-    def compute_transform(self):
-        """Compute the coordinate transformation."""
-        try:
-            ref1_idx = self.ref1_combo.currentData()
-            ref2_idx = self.ref2_combo.currentData()
+    def _parse_new_coords(self) -> list[tuple[float, float] | None]:
+        """Return (x, y) for each slot, or None if not yet filled."""
+        result = []
+        for xe, ye in zip(self._new_x_edits, self._new_y_edits):
+            try:
+                result.append((float(xe.text()), float(ye.text())))
+            except ValueError:
+                result.append(None)
+        return result
 
-            if ref1_idx == ref2_idx:
-                QMessageBox.warning(self, "Error", "Must select different reference points")
-                return
+    @staticmethod
+    def _fmt_info(info: dict) -> str:
+        dx, dy = info["displacement"]
+        return (
+            f"dx = {dx:.4f},  dy = {dy:.4f},  "
+            f"θ = {info['rotation_deg']:.4f}°,  "
+            f"scale = {info['scale']:.6f}"
+        )
 
-            ref1 = self.ref_points[ref1_idx]
-            ref2 = self.ref_points[ref2_idx]
+    # ------------------------------------------------------------------ #
+    #  Slots                                                               #
+    # ------------------------------------------------------------------ #
 
-            result = coord_utils.coor_transition(
-                (ref1['x'], ref1['y']),
-                (self.ref1_new_x.value(), self.ref1_new_y.value()),
-                (ref2['x'], ref2['y']),
-                (self.ref2_new_x.value(), self.ref2_new_y.value()),
-                (self.target_x.value(), self.target_y.value())
+    def _on_input_changed(self):
+        coords = self._parse_new_coords()
+        filled = [(i, c) for i, c in enumerate(coords) if c is not None]
+
+        if len(filled) < 2:
+            self._params_label.setText(
+                "(fill in at least 2 reference points above)"
+            )
+            self._update_flake_result(filled)
+            return
+
+        old_of = lambda i: (
+            self.ref_points[i].get("x", 0),
+            self.ref_points[i].get("y", 0),
+        )
+
+        if len(filled) == 2:
+            i0, c0 = filled[0]
+            i1, c1 = filled[1]
+            info = coord_utils.compute_transform_info(
+                old_of(i0), c0, old_of(i1), c1
+            )
+            text = (
+                f"Using Ref {i0 + 1} + Ref {i1 + 1}:\n"
+                f"  {self._fmt_info(info)}"
+            )
+        else:
+            # 3 points — compute two independent pairs and show deviation
+            i0, c0 = filled[0]
+            i1, c1 = filled[1]
+            i2, c2 = filled[2]
+            infoAB = coord_utils.compute_transform_info(
+                old_of(i0), c0, old_of(i1), c1
+            )
+            infoBC = coord_utils.compute_transform_info(
+                old_of(i1), c1, old_of(i2), c2
+            )
+            ddx   = abs(infoAB["displacement"][0] - infoBC["displacement"][0])
+            ddy   = abs(infoAB["displacement"][1] - infoBC["displacement"][1])
+            dang  = abs(infoAB["rotation_deg"]    - infoBC["rotation_deg"])
+            dscl  = abs(infoAB["scale"]           - infoBC["scale"])
+            text = (
+                f"Ref {i0+1}+{i1+1}:  {self._fmt_info(infoAB)}\n"
+                f"Ref {i1+1}+{i2+1}:  {self._fmt_info(infoBC)}\n"
+                f"Deviation:  "
+                f"Δdx = {ddx:.4f},  Δdy = {ddy:.4f},  "
+                f"Δθ = {dang:.4f}°,  Δscale = {dscl:.6f}"
             )
 
-            self.result_label.setText(f"X: {result[0]:.4f}, Y: {result[1]:.4f}")
-        except Exception as e:
-            QMessageBox.critical(self, "Transform Error", str(e))
+        self._params_label.setText(text)
+        self._update_flake_result(filled)
+
+    def _on_flake_changed(self, _index):
+        coords = self._parse_new_coords()
+        filled = [(i, c) for i, c in enumerate(coords) if c is not None]
+        self._update_flake_result(filled)
+
+    def _update_flake_result(self, filled: list):
+        flake = self._flake_combo.currentData()
+        if flake is None:
+            self._flake_result_label.setText("(no flake selected)")
+            return
+        if len(filled) < 2:
+            self._flake_result_label.setText(
+                "(establish a transform first — fill in at least 2 ref points)"
+            )
+            return
+        # Always use the first two filled points for the actual transform
+        i0, c0 = filled[0]
+        i1, c1 = filled[1]
+        old_of = lambda i: (
+            self.ref_points[i].get("x", 0),
+            self.ref_points[i].get("y", 0),
+        )
+        try:
+            nx, ny = coord_utils.coor_transition(
+                old_of(i0), c0,
+                old_of(i1), c1,
+                (flake.get("coord_x", 0), flake.get("coord_y", 0)),
+            )
+            self._flake_result_label.setText(
+                f"Old:  ({flake.get('coord_x', 0):.4f},  "
+                f"{flake.get('coord_y', 0):.4f})\n"
+                f"New:  ({nx:.4f},  {ny:.4f})"
+            )
+        except Exception as exc:
+            self._flake_result_label.setText(f"Transform error: {exc}")
 
 
 class WaferWidget(QWidget):
@@ -1025,32 +1127,19 @@ class WaferWidget(QWidget):
             return
 
         try:
-            wafer = db.get_or_create_wafer(
-                self.current_box_id,
-                self.grid_view.selected_cell[0],
-                self.grid_view.selected_cell[1]
-            )
-
-            ref_points_str = wafer.get('ref_points', '[]')
-            ref_points = json.loads(ref_points_str) if ref_points_str else []
+            wafer = db.get_wafer_by_id(self.current_wafer_id)
+            ref_points = json.loads(wafer.get('ref_points', '[]') or '[]')
 
             if len(ref_points) < 2:
                 QMessageBox.warning(
                     self, "Error",
-                    "Need at least 2 reference points for transformation"
+                    "Need at least 2 reference points for transformation.\n"
+                    "Use 'Edit…' to add them first."
                 )
                 return
 
-            # Pre-fill target from the selected flake row if one is selected
-            target = None
-            row = self.flake_table.currentRow()
-            if row >= 0:
-                flake_id = self.flake_table.item(row, 0).text()
-                flake = db.get_flake(flake_id)
-                if flake:
-                    target = (flake['coord_x'], flake['coord_y'])
-
-            dialog = CoordTransformDialog(ref_points, self, target=target)
+            flakes = db.get_flakes_for_wafer(self.current_wafer_id)
+            dialog = CoordTransformDialog(ref_points, flakes, self)
             dialog.exec()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to open transform dialog: {str(e)}")

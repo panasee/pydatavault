@@ -55,21 +55,30 @@ def compute_transform_info(
     ref1: tuple, ref1_new: tuple,
     ref2: tuple, ref2_new: tuple,
 ) -> dict:
-    """Compute transformation metadata (rotation angle, scale ratio)."""
-    rel_old = complex(ref2[0] - ref1[0], ref2[1] - ref1[1])
-    rel_new = complex(ref2_new[0] - ref1_new[0], ref2_new[1] - ref1_new[1])
-    dist_old = abs(rel_old)
-    dist_new = abs(rel_new)
+    """Compute transformation parameters for z_new = a*z_old + b.
 
-    if dist_old == 0:
-        return {"scale": 1.0, "rotation_deg": 0.0}
+    Returns:
+        scale       -- |a|, ratio of distances in new vs old system
+        rotation_deg -- arg(a) in degrees; positive = counter-clockwise
+        displacement -- (b.real, b.imag), where b = z1_new - a*z1_old
+                        This is the image of the old origin under the
+                        full affine transform (translation component).
+    """
+    z1_old = complex(ref1[0],     ref1[1])
+    z2_old = complex(ref2[0],     ref2[1])
+    z1_new = complex(ref1_new[0], ref1_new[1])
+    z2_new = complex(ref2_new[0], ref2_new[1])
 
-    rot = (rel_new / dist_new) / (rel_old / dist_old)
-    angle_deg = math.degrees(math.atan2(rot.imag, rot.real))
-    scale = dist_new / dist_old
+    dz_old = z2_old - z1_old
+    if abs(dz_old) == 0:
+        return {"scale": 1.0, "rotation_deg": 0.0,
+                "displacement": (ref1_new[0] - ref1[0], ref1_new[1] - ref1[1])}
+
+    a = (z2_new - z1_new) / dz_old          # complex scale+rotation factor
+    b = z1_new - a * z1_old                  # translational offset
 
     return {
-        "scale": scale,
-        "rotation_deg": angle_deg,
-        "displacement": (ref1_new[0] - ref1[0], ref1_new[1] - ref1[1]),
+        "scale": abs(a),
+        "rotation_deg": math.degrees(math.atan2(a.imag, a.real)),
+        "displacement": (b.real, b.imag),
     }
