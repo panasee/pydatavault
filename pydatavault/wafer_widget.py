@@ -249,12 +249,172 @@ class AddFlakeDialog(QDialog):
         }
 
 
+class RefPointSlot(QWidget):
+    """One of the three reference-point slots shown inside RefPointsDialog."""
+
+    def __init__(self, index: int, data: dict | None, parent=None):
+        super().__init__(parent)
+        self._photo_path: str = data.get('photo_path', '') if data else ''
+        self._index = index
+
+        outer = QVBoxLayout()
+        outer.setAlignment(Qt.AlignTop)
+
+        outer.addWidget(QLabel(f"Ref {index + 1}"))
+
+        # Photo thumbnail
+        self.thumb = QLabel()
+        self.thumb.setFixedSize(120, 90)
+        self.thumb.setAlignment(Qt.AlignCenter)
+        self.thumb.setStyleSheet("border: 1px solid #aaa; background: #f5f5f5;")
+        self._update_thumb()
+        outer.addWidget(self.thumb)
+
+        photo_btn = QPushButton("Set Photo…")
+        photo_btn.clicked.connect(self._pick_photo)
+        outer.addWidget(photo_btn)
+
+        clear_btn = QPushButton("Clear Slot")
+        clear_btn.clicked.connect(self._clear)
+        outer.addWidget(clear_btn)
+
+        # Coordinates
+        coord_grid = QHBoxLayout()
+        coord_grid.addWidget(QLabel("X:"))
+        self.x_spin = QDoubleSpinBox()
+        self.x_spin.setRange(-1e9, 1e9)
+        self.x_spin.setDecimals(4)
+        self.x_spin.setSingleStep(1.0)
+        self.x_spin.setValue(data['x'] if data else 0.0)
+        coord_grid.addWidget(self.x_spin)
+        outer.addLayout(coord_grid)
+
+        coord_grid2 = QHBoxLayout()
+        coord_grid2.addWidget(QLabel("Y:"))
+        self.y_spin = QDoubleSpinBox()
+        self.y_spin.setRange(-1e9, 1e9)
+        self.y_spin.setDecimals(4)
+        self.y_spin.setSingleStep(1.0)
+        self.y_spin.setValue(data['y'] if data else 0.0)
+        coord_grid2.addWidget(self.y_spin)
+        outer.addLayout(coord_grid2)
+
+        self.setLayout(outer)
+
+    # ── internal helpers ────────────────────────────────────────────────
+
+    def _update_thumb(self):
+        if self._photo_path and Path(self._photo_path).exists():
+            px = QPixmap(self._photo_path).scaled(
+                120, 90, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.thumb.setPixmap(px)
+        else:
+            self.thumb.setText("No photo")
+            self.thumb.setPixmap(QPixmap())
+
+    def _pick_photo(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Reference Photo", "",
+            "Images (*.png *.jpg *.jpeg *.tiff *.bmp)")
+        if path:
+            self._photo_path = path
+            self._update_thumb()
+
+    def _clear(self):
+        self._photo_path = ''
+        self.x_spin.setValue(0.0)
+        self.y_spin.setValue(0.0)
+        self._update_thumb()
+
+    # ── public API ──────────────────────────────────────────────────────
+
+    def is_set(self) -> bool:
+        """Return True if this slot has a photo assigned."""
+        return bool(self._photo_path)
+
+    def to_dict(self, dest_dir: Path) -> dict | None:
+        """Return serialisable dict, copying photo to dest_dir if needed.
+
+        Returns None if the slot has no photo (slot is empty/unused).
+        """
+        if not self._photo_path:
+            return None
+        src = Path(self._photo_path)
+        dest = dest_dir / src.name
+        if src != dest:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(src), str(dest))
+        return {
+            'x': self.x_spin.value(),
+            'y': self.y_spin.value(),
+            'photo_path': str(dest),
+        }
+
+
+class RefPointsDialog(QDialog):
+    """Dialog for editing all three reference points of a wafer at once.
+
+    Each slot shows a photo thumbnail, X/Y stage coordinates, and controls
+    to set or clear the photo. On accept, only slots with a photo are saved.
+    """
+
+    def __init__(self, wafer_id: int, ref_points: list[dict], parent=None):
+        super().__init__(parent)
+        self.wafer_id = wafer_id
+        self.setWindowTitle("Edit Reference Points")
+        self.setMinimumWidth(480)
+
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel(
+            "Set up to 3 reference points. Each point needs a microscope photo "
+            "and the corresponding stage coordinates (X, Y)."
+        ))
+
+        # Three slots side by side
+        slots_layout = QHBoxLayout()
+        # Pad existing data to length 3
+        padded = (ref_points + [None, None, None])[:3]
+        self.slots = [RefPointSlot(i, padded[i], self) for i in range(3)]
+        for slot in self.slots:
+            slots_layout.addWidget(slot)
+        layout.addLayout(slots_layout)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        ok_btn = QPushButton("Save")
+        ok_btn.setDefault(True)
+        ok_btn.clicked.connect(self._save)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addStretch()
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+        self.setLayout(layout)
+
+    def _save(self):
+        dest_dir = config.SHARED_DIR / "wafer_refs" / str(self.wafer_id)
+        new_points = []
+        for slot in self.slots:
+            entry = slot.to_dict(dest_dir)
+            if entry is not None:
+                new_points.append(entry)
+        try:
+            db.update_wafer(self.wafer_id, ref_points=json.dumps(new_points))
+            self.accept()
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", str(e))
+
+
 class CoordTransformDialog(QDialog):
     """Dialog for transforming coordinates using reference points."""
 
-    def __init__(self, ref_points: List[dict], parent=None):
+    def __init__(self, ref_points: List[dict], parent=None,
+                 target: tuple | None = None):
         super().__init__(parent)
         self.ref_points = ref_points
+        self._prefill_target = target
         self.setWindowTitle("Coordinate Transform")
         self.setGeometry(100, 100, 600, 400)
 
@@ -315,14 +475,20 @@ class CoordTransformDialog(QDialog):
         target_layout = QHBoxLayout()
         target_layout.addWidget(QLabel("X:"))
         self.target_x = QDoubleSpinBox()
-        self.target_x.setRange(-10000, 10000)
+        self.target_x.setRange(-1e9, 1e9)
+        self.target_x.setDecimals(4)
         self.target_x.setSingleStep(0.1)
+        if target is not None:
+            self.target_x.setValue(target[0])
         target_layout.addWidget(self.target_x)
 
         target_layout.addWidget(QLabel("Y:"))
         self.target_y = QDoubleSpinBox()
-        self.target_y.setRange(-10000, 10000)
+        self.target_y.setRange(-1e9, 1e9)
+        self.target_y.setDecimals(4)
         self.target_y.setSingleStep(0.1)
+        if target is not None:
+            self.target_y.setValue(target[1])
         target_layout.addWidget(self.target_y)
         layout.addLayout(target_layout)
 
@@ -427,13 +593,17 @@ class WaferWidget(QWidget):
         right_layout.addWidget(self.wafer_header)
 
         # Reference points section
-        right_layout.addWidget(QLabel("Reference Points:"))
-        self.ref_points_label = QLabel("None")
-        right_layout.addWidget(self.ref_points_label)
+        ref_header = QHBoxLayout()
+        ref_header.addWidget(QLabel("Reference Points:"))
+        edit_ref_btn = QPushButton("Edit…")
+        edit_ref_btn.setFixedWidth(60)
+        edit_ref_btn.clicked.connect(self.edit_ref_points)
+        ref_header.addWidget(edit_ref_btn)
+        right_layout.addLayout(ref_header)
 
-        add_ref_btn = QPushButton("Add Reference Point")
-        add_ref_btn.clicked.connect(self.add_ref_point)
-        right_layout.addWidget(add_ref_btn)
+        self.ref_points_label = QLabel("None")
+        self.ref_points_label.setWordWrap(True)
+        right_layout.addWidget(self.ref_points_label)
 
         # Flake table
         right_layout.addWidget(QLabel("Flakes:"))
@@ -570,17 +740,18 @@ class WaferWidget(QWidget):
             QMessageBox.critical(self, "Database Error", f"Failed to load flakes: {str(e)}")
 
     def load_ref_points(self, wafer: dict):
-        """Load and display reference points for wafer."""
+        """Load and display reference points summary for wafer."""
         try:
-            ref_points_str = wafer.get('ref_points', '[]')
-            ref_points = json.loads(ref_points_str) if ref_points_str else []
-
-            if ref_points:
-                text = f"{len(ref_points)} reference point(s)"
-                self.ref_points_label.setText(text)
-            else:
+            ref_points = json.loads(wafer.get('ref_points', '[]') or '[]')
+            if not ref_points:
                 self.ref_points_label.setText("None")
-        except Exception as e:
+                return
+            lines = []
+            for i, rp in enumerate(ref_points):
+                photo_ok = "📷" if rp.get('photo_path') and Path(rp['photo_path']).exists() else "—"
+                lines.append(f"Ref {i+1}: {photo_ok}  ({rp.get('x', 0):.2f}, {rp.get('y', 0):.2f})")
+            self.ref_points_label.setText("\n".join(lines))
+        except Exception:
             self.ref_points_label.setText("Error loading ref points")
 
     def on_flake_cell_changed(self, item):
@@ -832,99 +1003,20 @@ class WaferWidget(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to view photo: {str(e)}")
 
-    def add_ref_point(self):
-        """Add a reference point to the current wafer."""
+    def edit_ref_points(self):
+        """Open the reference points editor for the current wafer."""
         if not self.current_wafer_id:
             QMessageBox.warning(self, "Error", "Please select a wafer first")
             return
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Add Reference Point")
-        dialog.setGeometry(100, 100, 400, 300)
-
-        layout = QVBoxLayout()
-
-        layout.addWidget(QLabel("X Coordinate:"))
-        x_spin = QDoubleSpinBox()
-        x_spin.setRange(-10000, 10000)
-        x_spin.setSingleStep(0.1)
-        layout.addWidget(x_spin)
-
-        layout.addWidget(QLabel("Y Coordinate:"))
-        y_spin = QDoubleSpinBox()
-        y_spin.setRange(-10000, 10000)
-        y_spin.setSingleStep(0.1)
-        layout.addWidget(y_spin)
-
-        layout.addWidget(QLabel("Photo:"))
-        photo_label = QLabel("No photo selected")
-        layout.addWidget(photo_label)
-        photo_path_holder = [None]
-
-        photo_btn = QPushButton("Browse...")
-        def select_photo():
-            file_path, _ = QFileDialog.getOpenFileName(
-                dialog, "Select Photo", "", "Image Files (*.png *.jpg *.jpeg *.tiff)"
-            )
-            if file_path:
-                photo_path_holder[0] = file_path
-                photo_label.setText(Path(file_path).name)
-
-        photo_btn.clicked.connect(select_photo)
-        layout.addWidget(photo_btn)
-
-        btn_layout = QHBoxLayout()
-        ok_btn = QPushButton("Add")
-        cancel_btn = QPushButton("Cancel")
-
-        def add_ref():
-            try:
-                wafer = db.get_or_create_wafer(
-                    self.current_box_id,
-                    self.grid_view.selected_cell[0],
-                    self.grid_view.selected_cell[1]
-                )
-
-                ref_points_str = wafer.get('ref_points', '[]')
-                ref_points = json.loads(ref_points_str) if ref_points_str else []
-
-                photo_path = None
-                if photo_path_holder[0]:
-                    ref_dir = config.FLAKES_DIR / f"ref_points_{self.current_wafer_id}"
-                    ref_dir.mkdir(parents=True, exist_ok=True)
-                    dest = ref_dir / Path(photo_path_holder[0]).name
-                    shutil.copy(photo_path_holder[0], dest)
-                    photo_path = str(dest)
-
-                ref_points.append({
-                    'x': x_spin.value(),
-                    'y': y_spin.value(),
-                    'photo_path': photo_path or ''
-                })
-
-                db.update_wafer(
-                    self.current_wafer_id,
-                    ref_points=json.dumps(ref_points)
-                )
-
-                dialog.accept()
-                wafer = db.get_or_create_wafer(
-                    self.current_box_id,
-                    self.grid_view.selected_cell[0],
-                    self.grid_view.selected_cell[1]
-                )
+        try:
+            wafer = db.get_wafer_by_id(self.current_wafer_id)
+            ref_points = json.loads(wafer.get('ref_points', '[]') or '[]')
+            dialog = RefPointsDialog(self.current_wafer_id, ref_points, self)
+            if dialog.exec() == QDialog.Accepted:
+                wafer = db.get_wafer_by_id(self.current_wafer_id)
                 self.load_ref_points(wafer)
-            except Exception as e:
-                QMessageBox.critical(dialog, "Database Error", str(e))
-
-        ok_btn.clicked.connect(add_ref)
-        cancel_btn.clicked.connect(dialog.reject)
-        btn_layout.addWidget(ok_btn)
-        btn_layout.addWidget(cancel_btn)
-        layout.addLayout(btn_layout)
-
-        dialog.setLayout(layout)
-        dialog.exec()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
 
     def show_transform_dialog(self):
         """Show coordinate transform dialog."""
@@ -949,7 +1041,16 @@ class WaferWidget(QWidget):
                 )
                 return
 
-            dialog = CoordTransformDialog(ref_points, self)
+            # Pre-fill target from the selected flake row if one is selected
+            target = None
+            row = self.flake_table.currentRow()
+            if row >= 0:
+                flake_id = self.flake_table.item(row, 0).text()
+                flake = db.get_flake(flake_id)
+                if flake:
+                    target = (flake['coord_x'], flake['coord_y'])
+
+            dialog = CoordTransformDialog(ref_points, self, target=target)
             dialog.exec()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to open transform dialog: {str(e)}")
