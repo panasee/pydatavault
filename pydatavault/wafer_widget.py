@@ -1,4 +1,5 @@
 import json
+import math
 import shutil
 from pathlib import Path
 from typing import Optional, Dict, List
@@ -7,10 +8,12 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QListWidget, QListWidgetItem,
     QPushButton, QTableWidget, QTableWidgetItem, QDialog, QLabel, QLineEdit,
     QSpinBox, QDoubleSpinBox, QTextEdit, QMessageBox, QFileDialog,
-    QHeaderView, QComboBox
+    QHeaderView, QComboBox, QSizePolicy
 )
-from PySide6.QtCore import Qt, Signal, QSize, QRect, QPoint
-from PySide6.QtGui import QColor, QPainter, QBrush, QPen, QFont, QPixmap
+from PySide6.QtCore import Qt, Signal, QSize, QRect, QPoint, QPointF, QRectF
+from PySide6.QtGui import (
+    QColor, QPainter, QBrush, QPen, QFont, QPixmap, QPolygonF
+)
 
 from . import database as db
 from . import config
@@ -407,6 +410,278 @@ class RefPointsDialog(QDialog):
             QMessageBox.critical(self, "Save Error", str(e))
 
 
+class WaferDiagramWidget(QWidget):
+    """QPainter-based diagram that overlays old and new coordinate systems.
+
+    Old system (blue, hollow / dashed):
+      - Parallelogram outline of the wafer
+      - Ref points as hollow circles; thumbnail photos drawn beside them
+      - Flakes as hollow circles labelled with sequential numbers
+      - Click any point to display its old-system coordinates
+
+    New system (red, solid):  appears after set_new_transform() is called.
+      - Same physical points transformed to the new coordinate frame
+      - Plotted in the same screen space as old coords (same px/unit scale)
+      - Solid circles; flakes keep their number labels
+
+    Scale is fixed so the longest edge of the (old-coord) parallelogram
+    equals TARGET_LONG_EDGE_PX pixels.
+    """
+
+    TARGET_LONG_EDGE_PX = 300
+    R_CIRCLE = 6          # circle radius in pixels
+    THUMB_W, THUMB_H = 72, 54
+
+    def __init__(self, ref_points: list[dict], flakes: list[dict],
+                 parent=None):
+        super().__init__(parent)
+        self.ref_points = ref_points
+        self.flakes = flakes
+        self._new_filled: list[tuple[int, tuple]] = []
+        self._thumbnails: dict[int, QPixmap] = {}
+        self._click_info = ""
+        # screen-space hit-test caches (populated during paintEvent)
+        self._old_ref_sp: list[QPointF] = []
+        self._old_flake_sp: list[QPointF] = []
+        # layout params (computed in _compute_layout)
+        self._scale = 1.0
+        self._cx = 0.0
+        self._cy = 0.0
+        self.setMinimumSize(360, 300)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setMouseTracking(True)
+        self._load_thumbnails()
+        self._compute_layout()
+
+    # ── thumbnail loading ─────────────────────────────────────────────
+
+    def _load_thumbnails(self):
+        for i, rp in enumerate(self.ref_points):
+            path = rp.get("photo_path", "")
+            if path and Path(path).exists():
+                pm = QPixmap(str(path))
+                if not pm.isNull():
+                    self._thumbnails[i] = pm.scaled(
+                        self.THUMB_W, self.THUMB_H,
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation,
+                    )
+
+    # ── geometry helpers ──────────────────────────────────────────────
+
+    def _para_vertices(self) -> list[tuple[float, float]]:
+        """Return the 4 parallelogram vertices (old coords) in draw order.
+
+        Given 3 ref points A, B, C, there are 3 candidate 4th vertices.
+        We pick the one that produces the *smallest* parallelogram area,
+        which corresponds to the two shorter sides (not the diagonal)
+        spanning the shape — i.e. the physically correct wafer outline.
+        """
+        rp = self.ref_points
+        if len(rp) < 2:
+            return [(rp[i]["x"], rp[i]["y"]) for i in range(len(rp))]
+        if len(rp) == 2:
+            ax, ay = rp[0]["x"], rp[0]["y"]
+            bx, by = rp[1]["x"], rp[1]["y"]
+            return [(ax, ay), (bx, by)]
+
+        ax, ay = rp[0]["x"], rp[0]["y"]
+        bx, by = rp[1]["x"], rp[1]["y"]
+        cx, cy = rp[2]["x"], rp[2]["y"]
+
+        def area(u, v):
+            return abs(u[0] * v[1] - u[1] * v[0])
+
+        candidates = [
+            # (4th vertex,  draw order)
+            ((ax + bx - cx, ay + by - cy),
+             [(cx, cy), (ax, ay), (bx + ax - cx, by + ay - cy), (bx, by)]),
+            ((ax + cx - bx, ay + cy - by),
+             [(bx, by), (ax, ay), (ax + cx - bx, ay + cy - by), (cx, cy)]),
+            ((bx + cx - ax, by + cy - ay),
+             [(ax, ay), (bx, by), (bx + cx - ax, by + cy - ay), (cx, cy)]),
+        ]
+        best_order = candidates[0][1]
+        best_area = float("inf")
+        for (dx, dy), order in candidates:
+            u = (order[1][0] - order[0][0], order[1][1] - order[0][1])
+            v = (order[3][0] - order[0][0], order[3][1] - order[0][1])
+            a = area(u, v)
+            if a < best_area:
+                best_area = a
+                best_order = order
+        return best_order
+
+    def _compute_layout(self):
+        """Determine scale and world-centre from old-coord parallelogram."""
+        verts = self._para_vertices()
+        if len(verts) < 2:
+            self._scale, self._cx, self._cy = 1.0, 0.0, 0.0
+            return
+        longest = max(
+            math.hypot(verts[(i + 1) % len(verts)][0] - verts[i][0],
+                       verts[(i + 1) % len(verts)][1] - verts[i][1])
+            for i in range(len(verts))
+        )
+        if longest == 0:
+            longest = 1.0
+        self._scale = self.TARGET_LONG_EDGE_PX / longest
+        all_pts = verts + [(fl.get("coord_x", 0), fl.get("coord_y", 0))
+                           for fl in self.flakes]
+        self._cx = (min(p[0] for p in all_pts) + max(p[0] for p in all_pts)) / 2
+        self._cy = (min(p[1] for p in all_pts) + max(p[1] for p in all_pts)) / 2
+
+    def _to_screen(self, x: float, y: float) -> QPointF:
+        sx = (x - self._cx) * self._scale + self.width() / 2
+        sy = -(y - self._cy) * self._scale + self.height() / 2
+        return QPointF(sx, sy)
+
+    # ── public API ────────────────────────────────────────────────────
+
+    def set_new_transform(self, filled: list[tuple[int, tuple]]):
+        """Update the new-coord overlay.  filled = [(idx,(x_new,y_new)),…]"""
+        self._new_filled = filled
+        self.update()
+
+    # ── transform helper ──────────────────────────────────────────────
+
+    def _fwd(self, x: float, y: float) -> tuple[float, float] | None:
+        """Forward similarity transform (old → new) for one point."""
+        if len(self._new_filled) < 2:
+            return None
+        i0, c0 = self._new_filled[0]
+        i1, c1 = self._new_filled[1]
+        r1 = (self.ref_points[i0]["x"], self.ref_points[i0]["y"])
+        r2 = (self.ref_points[i1]["x"], self.ref_points[i1]["y"])
+        try:
+            return coord_utils.coor_transition(r1, c0, r2, c1, (x, y))
+        except Exception:
+            return None
+
+    # ── painting ──────────────────────────────────────────────────────
+
+    def paintEvent(self, _event):
+        self._compute_layout()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#f8f8f8"))
+
+        has_new = len(self._new_filled) >= 2
+        C_OLD = QColor("#2255cc")
+        C_NEW = QColor("#cc2222")
+
+        verts = self._para_vertices()
+
+        # ── old: dashed parallelogram ─────────────────────────────────
+        if len(verts) >= 3:
+            poly = QPolygonF([self._to_screen(x, y) for x, y in verts])
+            pen = QPen(C_OLD, 1.5, Qt.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPolygon(poly)
+
+        # ── old: ref points (hollow) + thumbnails ─────────────────────
+        self._old_ref_sp = []
+        for i, rp in enumerate(self.ref_points):
+            sp = self._to_screen(rp["x"], rp["y"])
+            self._old_ref_sp.append(sp)
+            painter.setPen(QPen(C_OLD, 2))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(sp, self.R_CIRCLE, self.R_CIRCLE)
+            # thumbnail
+            if i in self._thumbnails:
+                pm = self._thumbnails[i]
+                tx = max(0, min(int(sp.x()) + 10, self.width()  - pm.width()))
+                ty = max(0, min(int(sp.y()) - pm.height() // 2,
+                                self.height() - pm.height()))
+                painter.drawPixmap(tx, ty, pm)
+
+        # ── old: flakes (hollow, numbered) ───────────────────────────
+        self._old_flake_sp = []
+        font = painter.font()
+        font.setPointSize(8)
+        painter.setFont(font)
+        for idx, fl in enumerate(self.flakes):
+            sp = self._to_screen(fl.get("coord_x", 0), fl.get("coord_y", 0))
+            self._old_flake_sp.append(sp)
+            painter.setPen(QPen(C_OLD, 1.5))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(sp, self.R_CIRCLE, self.R_CIRCLE)
+            painter.setPen(QPen(C_OLD))
+            painter.drawText(QPointF(sp.x() + self.R_CIRCLE + 2,
+                                     sp.y() - 3), str(idx + 1))
+
+        # ── new: solid parallelogram + points ────────────────────────
+        if has_new:
+            # parallelogram
+            new_verts = [self._fwd(x, y) for x, y in verts]
+            new_poly = [self._to_screen(nx, ny)
+                        for nxy in new_verts if nxy is not None
+                        for nx, ny in [nxy]]
+            if len(new_poly) >= 3:
+                painter.setPen(QPen(C_NEW, 1.5, Qt.SolidLine))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawPolygon(QPolygonF(new_poly))
+
+            # ref points (solid)
+            for rp in self.ref_points:
+                tp = self._fwd(rp["x"], rp["y"])
+                if tp:
+                    sp = self._to_screen(*tp)
+                    painter.setPen(QPen(C_NEW, 2))
+                    painter.setBrush(QBrush(C_NEW))
+                    painter.drawEllipse(sp, self.R_CIRCLE, self.R_CIRCLE)
+
+            # flakes (solid, numbered)
+            for idx, fl in enumerate(self.flakes):
+                tp = self._fwd(fl.get("coord_x", 0), fl.get("coord_y", 0))
+                if tp:
+                    sp = self._to_screen(*tp)
+                    painter.setPen(QPen(C_NEW, 1.5))
+                    painter.setBrush(QBrush(C_NEW))
+                    painter.drawEllipse(sp, self.R_CIRCLE, self.R_CIRCLE)
+                    painter.setBrush(Qt.NoBrush)
+                    painter.setPen(QPen(C_NEW))
+                    painter.drawText(QPointF(sp.x() + self.R_CIRCLE + 2,
+                                             sp.y() - 3), str(idx + 1))
+
+        # ── click annotation ─────────────────────────────────────────
+        if self._click_info:
+            painter.setPen(QPen(QColor("#333333")))
+            painter.drawText(
+                QRectF(4, self.height() - 20, self.width() - 8, 18),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                self._click_info,
+            )
+
+    # ── mouse ─────────────────────────────────────────────────────────
+
+    def mousePressEvent(self, event):
+        pos = event.position() if hasattr(event, "position") else QPointF(event.pos())
+        best_d = 14.0
+        best_info = ""
+
+        for i, sp in enumerate(self._old_ref_sp):
+            d = math.hypot(pos.x() - sp.x(), pos.y() - sp.y())
+            if d < best_d:
+                rp = self.ref_points[i]
+                best_info = (f"Ref {i + 1}:  "
+                             f"({rp.get('x', 0):.4f},  {rp.get('y', 0):.4f})")
+                best_d = d
+
+        for idx, sp in enumerate(self._old_flake_sp):
+            d = math.hypot(pos.x() - sp.x(), pos.y() - sp.y())
+            if d < best_d:
+                fl = self.flakes[idx]
+                best_info = (f"Flake {idx + 1} [{fl['flake_id']}]:  "
+                             f"({fl.get('coord_x', 0):.4f},  "
+                             f"{fl.get('coord_y', 0):.4f})")
+                best_d = d
+
+        self._click_info = best_info
+        self.update()
+
+
 class CoordTransformDialog(QDialog):
     """Coordinate-system transformation dialog.
 
@@ -433,7 +708,7 @@ class CoordTransformDialog(QDialog):
         self.ref_points = ref_points
         self.flakes = flakes
         self.setWindowTitle("Coordinate Transform")
-        self.setMinimumWidth(660)
+        self.setMinimumSize(980, 420)
         self._build_ui()
 
     # ------------------------------------------------------------------ #
@@ -441,17 +716,24 @@ class CoordTransformDialog(QDialog):
     # ------------------------------------------------------------------ #
 
     def _build_ui(self):
-        outer = QVBoxLayout(self)
+        outer = QHBoxLayout(self)
         outer.setSpacing(12)
 
-        # ── Ref-point input table ─────────────────────────────────────
-        outer.addWidget(QLabel(
-            "<b>Reference Points</b> — type the new-system coordinates "
-            "next to each point that you have re-measured:"
-        ))
+        # ── Left: wafer diagram ───────────────────────────────────────
+        self._diagram = WaferDiagramWidget(self.ref_points, self.flakes, self)
+        self._diagram.setMinimumSize(380, 340)
+        outer.addWidget(self._diagram, stretch=2)
 
+        # ── Right: controls ───────────────────────────────────────────
+        right = QVBoxLayout()
+        right.setSpacing(8)
+
+        # Ref-point input table
+        right.addWidget(QLabel(
+            "<b>Reference Points</b> — enter new-system coordinates:"
+        ))
         grid = QGridLayout()
-        grid.setHorizontalSpacing(10)
+        grid.setHorizontalSpacing(8)
         for col, text in enumerate(["", "Old X", "Old Y", "→", "New X", "New Y"]):
             lbl = QLabel(f"<b>{text}</b>" if text else "")
             lbl.setAlignment(Qt.AlignCenter)
@@ -466,21 +748,20 @@ class CoordTransformDialog(QDialog):
             grid.addWidget(QLabel("→"), i + 1, 3)
             xe = QLineEdit()
             xe.setPlaceholderText("x")
-            xe.setFixedWidth(110)
+            xe.setFixedWidth(100)
             ye = QLineEdit()
             ye.setPlaceholderText("y")
-            ye.setFixedWidth(110)
+            ye.setFixedWidth(100)
             xe.textChanged.connect(self._on_input_changed)
             ye.textChanged.connect(self._on_input_changed)
             grid.addWidget(xe, i + 1, 4)
             grid.addWidget(ye, i + 1, 5)
             self._new_x_edits.append(xe)
             self._new_y_edits.append(ye)
+        right.addLayout(grid)
 
-        outer.addLayout(grid)
-
-        # ── Transform parameters ──────────────────────────────────────
-        outer.addWidget(QLabel("<b>Transform Parameters</b>:"))
+        # Transform parameters
+        right.addWidget(QLabel("<b>Transform Parameters</b>:"))
         self._params_label = QLabel(
             "(fill in at least 2 reference points above)"
         )
@@ -488,13 +769,11 @@ class CoordTransformDialog(QDialog):
         self._params_label.setStyleSheet(
             "background:#f5f5f5; padding:8px; border-radius:4px;"
         )
-        self._params_label.setTextInteractionFlags(
-            Qt.TextSelectableByMouse
-        )
-        outer.addWidget(self._params_label)
+        self._params_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        right.addWidget(self._params_label)
 
-        # ── Flake picker ──────────────────────────────────────────────
-        outer.addWidget(QLabel("<b>Flake Coordinates</b>:"))
+        # Flake picker
+        right.addWidget(QLabel("<b>Flake Coordinates</b>:"))
         flake_row = QHBoxLayout()
         flake_row.addWidget(QLabel("Flake:"))
         self._flake_combo = QComboBox()
@@ -507,22 +786,25 @@ class CoordTransformDialog(QDialog):
             self._flake_combo.addItem(label, fl)
         self._flake_combo.currentIndexChanged.connect(self._on_flake_changed)
         flake_row.addWidget(self._flake_combo, 1)
-        outer.addLayout(flake_row)
+        right.addLayout(flake_row)
 
         self._flake_result_label = QLabel("(no flake selected)")
         self._flake_result_label.setWordWrap(True)
         self._flake_result_label.setStyleSheet(
             "background:#f0f8ff; padding:8px; border-radius:4px;"
         )
-        self._flake_result_label.setTextInteractionFlags(
-            Qt.TextSelectableByMouse
-        )
-        outer.addWidget(self._flake_result_label)
+        self._flake_result_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        right.addWidget(self._flake_result_label)
 
-        outer.addStretch()
+        right.addStretch()
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.accept)
-        outer.addWidget(close_btn)
+        right.addWidget(close_btn)
+
+        right_widget = QWidget()
+        right_widget.setLayout(right)
+        right_widget.setMinimumWidth(420)
+        outer.addWidget(right_widget, stretch=3)
 
     # ------------------------------------------------------------------ #
     #  Helpers                                                             #
@@ -561,6 +843,7 @@ class CoordTransformDialog(QDialog):
             self._params_label.setText(
                 "(fill in at least 2 reference points above)"
             )
+            self._diagram.set_new_transform([])
             self._update_flake_result(filled)
             return
 
@@ -602,11 +885,13 @@ class CoordTransformDialog(QDialog):
             )
 
         self._params_label.setText(text)
+        self._diagram.set_new_transform(filled)
         self._update_flake_result(filled)
 
     def _on_flake_changed(self, _index):
         coords = self._parse_new_coords()
         filled = [(i, c) for i, c in enumerate(coords) if c is not None]
+        self._diagram.set_new_transform(filled)
         self._update_flake_result(filled)
 
     def _update_flake_result(self, filled: list):
