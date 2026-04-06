@@ -583,7 +583,11 @@ class NewDeviceDialog(QDialog):
                     layer['flake_id'],
                     order_index
                 )
-                db.update_flake(layer['flake_id'], status="used")
+                db.update_flake(
+                    layer['flake_id'],
+                    status="used",
+                    used_in_device=device_id,
+                )
 
             super().accept()
         except Exception as e:

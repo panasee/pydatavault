@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS wafers (
 
 CREATE TABLE IF NOT EXISTS flakes (
     flake_id    TEXT PRIMARY KEY,
-    wafer_id    INTEGER REFERENCES wafers(wafer_id) ON DELETE CASCADE,
+    wafer_id    INTEGER REFERENCES wafers(wafer_id) ON DELETE SET NULL,
     material    TEXT NOT NULL DEFAULT '',
     thickness   TEXT DEFAULT '',
     magnification TEXT DEFAULT '',
@@ -114,19 +114,33 @@ def _migrate():
     Each migration is idempotent: it checks whether the change is already
     present before attempting it.
     """
-    # Migration 1: flakes.wafer_id  ON DELETE SET NULL → ON DELETE CASCADE
+    # Migration: flakes.wafer_id must be ON DELETE SET NULL.
+    #
+    # Earlier versions shipped ON DELETE CASCADE (which wiped used-flake
+    # provenance when a wafer was deleted).  The correct policy is:
+    #   • application code explicitly deletes available flakes before
+    #     removing a wafer;
+    #   • used flakes survive with wafer_id=NULL so device_layers retains
+    #     the material/thickness history.
+    #
     # SQLite does not support ALTER COLUMN, so we rebuild the table.
+    _CORRECT_POLICY = "ON DELETE SET NULL"
+    _WRONG_POLICY   = "ON DELETE CASCADE"
+
     with get_conn() as conn:
         row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='flakes'"
         ).fetchone()
-        if row and "ON DELETE SET NULL" in (row.get("sql") or ""):
+        sql = (row.get("sql") or "") if row else ""
+        # Only migrate when the wrong policy is currently in place.
+        # (A brand-new DB created from SCHEMA will already have SET NULL.)
+        if _WRONG_POLICY in sql and _CORRECT_POLICY not in sql:
             conn.executescript("""
                 PRAGMA foreign_keys = OFF;
 
                 CREATE TABLE flakes_new (
                     flake_id      TEXT PRIMARY KEY,
-                    wafer_id      INTEGER REFERENCES wafers(wafer_id) ON DELETE CASCADE,
+                    wafer_id      INTEGER REFERENCES wafers(wafer_id) ON DELETE SET NULL,
                     material      TEXT NOT NULL DEFAULT '',
                     thickness     TEXT DEFAULT '',
                     magnification TEXT DEFAULT '',
@@ -219,7 +233,25 @@ def update_wafer(wafer_id: int, **kwargs):
 
 
 def delete_wafer(wafer_id: int):
+    """Delete a wafer and clean up its flakes.
+
+    Policy:
+      • 'available' flakes are deleted (they have no further use once the
+        physical wafer is discarded).
+      • 'used' flakes are preserved: their wafer_id is set to NULL by the
+        ON DELETE SET NULL FK, but material/thickness/device linkage remain
+        intact for device provenance.
+
+    The wafer row itself is then deleted; the FK cascade handles
+    wafer_boxes → wafers automatically when a box is removed.
+    """
     with get_conn() as conn:
+        # Explicitly remove available flakes first so they don't become orphans.
+        conn.execute(
+            "DELETE FROM flakes WHERE wafer_id=? AND status='available'",
+            (wafer_id,))
+        # Delete the wafer; ON DELETE SET NULL on flakes.wafer_id will NULL-out
+        # any remaining (used) flake rows automatically.
         conn.execute("DELETE FROM wafers WHERE wafer_id=?", (wafer_id,))
 
 
