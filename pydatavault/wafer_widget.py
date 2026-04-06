@@ -536,6 +536,34 @@ class WaferDiagramWidget(QWidget):
         sy = -(y - self._cy) * self._scale + self.height() / 2
         return QPointF(sx, sy)
 
+    def _new_center(self) -> tuple[float, float] | None:
+        """Centroid of the transformed ref points in new-coord space.
+
+        The instruments share the same orientation; displacement merely
+        reflects coordinate zeroing.  By centering the new overlay on its
+        own centroid (same screen centre as the old overlay) we eliminate
+        translation and show only the rotational difference — which is what
+        actually matters for wafer-placement calibration.
+        """
+        if len(self._new_filled) < 2:
+            return None
+        pts = [self._fwd(rp["x"], rp["y"]) for rp in self.ref_points]
+        pts = [p for p in pts if p is not None]
+        if not pts:
+            return None
+        return (sum(p[0] for p in pts) / len(pts),
+                sum(p[1] for p in pts) / len(pts))
+
+    def _to_screen_new(self, x_new: float, y_new: float) -> QPointF:
+        """Map a new-system point to screen, centred at the same pixel as
+        the old system.  Translation is ignored — only rotation/scale show."""
+        nc = self._new_center()
+        if nc is None:
+            return self._to_screen(x_new, y_new)
+        sx = (x_new - nc[0]) * self._scale + self.width() / 2
+        sy = -(y_new - nc[1]) * self._scale + self.height() / 2
+        return QPointF(sx, sy)
+
     # ── public API ────────────────────────────────────────────────────
 
     def set_new_transform(self, filled: list[tuple[int, tuple]]):
@@ -612,10 +640,13 @@ class WaferDiagramWidget(QWidget):
                                      sp.y() - 3), str(idx + 1))
 
         # ── new: solid parallelogram + points ────────────────────────
+        # Translation is removed by centering the new overlay on its own
+        # centroid (same screen centre as old).  Only rotation and scale
+        # remain visible, which is what matters for wafer-placement check.
         if has_new:
             # parallelogram
             new_verts = [self._fwd(x, y) for x, y in verts]
-            new_poly = [self._to_screen(nx, ny)
+            new_poly = [self._to_screen_new(nx, ny)
                         for nxy in new_verts if nxy is not None
                         for nx, ny in [nxy]]
             if len(new_poly) >= 3:
@@ -627,7 +658,7 @@ class WaferDiagramWidget(QWidget):
             for rp in self.ref_points:
                 tp = self._fwd(rp["x"], rp["y"])
                 if tp:
-                    sp = self._to_screen(*tp)
+                    sp = self._to_screen_new(*tp)
                     painter.setPen(QPen(C_NEW, 2))
                     painter.setBrush(QBrush(C_NEW))
                     painter.drawEllipse(sp, self.R_CIRCLE, self.R_CIRCLE)
@@ -636,7 +667,7 @@ class WaferDiagramWidget(QWidget):
             for idx, fl in enumerate(self.flakes):
                 tp = self._fwd(fl.get("coord_x", 0), fl.get("coord_y", 0))
                 if tp:
-                    sp = self._to_screen(*tp)
+                    sp = self._to_screen_new(*tp)
                     painter.setPen(QPen(C_NEW, 1.5))
                     painter.setBrush(QBrush(C_NEW))
                     painter.drawEllipse(sp, self.R_CIRCLE, self.R_CIRCLE)
