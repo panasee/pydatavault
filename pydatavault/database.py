@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS wafers (
 
 CREATE TABLE IF NOT EXISTS flakes (
     flake_id    TEXT PRIMARY KEY,
-    wafer_id    INTEGER REFERENCES wafers(wafer_id) ON DELETE SET NULL,
+    wafer_id    INTEGER REFERENCES wafers(wafer_id) ON DELETE CASCADE,
     material    TEXT NOT NULL DEFAULT '',
     thickness   TEXT DEFAULT '',
     magnification TEXT DEFAULT '',
@@ -101,10 +101,54 @@ CREATE TABLE IF NOT EXISTS device_layers (
 
 
 def init_db():
-    """Initialize the database schema."""
+    """Initialize the database schema and apply any pending migrations."""
     config.ensure_dirs()
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+    _migrate()
+
+
+def _migrate():
+    """Apply incremental schema migrations to existing databases.
+
+    Each migration is idempotent: it checks whether the change is already
+    present before attempting it.
+    """
+    # Migration 1: flakes.wafer_id  ON DELETE SET NULL → ON DELETE CASCADE
+    # SQLite does not support ALTER COLUMN, so we rebuild the table.
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='flakes'"
+        ).fetchone()
+        if row and "ON DELETE SET NULL" in (row.get("sql") or ""):
+            conn.executescript("""
+                PRAGMA foreign_keys = OFF;
+
+                CREATE TABLE flakes_new (
+                    flake_id      TEXT PRIMARY KEY,
+                    wafer_id      INTEGER REFERENCES wafers(wafer_id) ON DELETE CASCADE,
+                    material      TEXT NOT NULL DEFAULT '',
+                    thickness     TEXT DEFAULT '',
+                    magnification TEXT DEFAULT '',
+                    photo_path    TEXT DEFAULT '',
+                    coord_x       REAL DEFAULT 0.0,
+                    coord_y       REAL DEFAULT 0.0,
+                    status        TEXT NOT NULL DEFAULT 'available'
+                                  CHECK(status IN ('available','used')),
+                    used_in_device TEXT DEFAULT NULL
+                                  REFERENCES devices(device_id) ON DELETE SET NULL,
+                    notes         TEXT DEFAULT '',
+                    created_at    TEXT DEFAULT (datetime('now','localtime'))
+                );
+
+                INSERT INTO flakes_new SELECT * FROM flakes;
+
+                DROP TABLE flakes;
+
+                ALTER TABLE flakes_new RENAME TO flakes;
+
+                PRAGMA foreign_keys = ON;
+            """)
 
 
 # ── Wafer Box CRUD ──────────────────────────────────────────────────────
