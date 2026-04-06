@@ -984,7 +984,7 @@ class WaferWidget(QWidget):
         add_box_btn.clicked.connect(self.add_box)
         box_btn_layout.addWidget(add_box_btn)
 
-        rename_box_btn = QPushButton("Rename Box")
+        rename_box_btn = QPushButton("Edit Box")
         rename_box_btn.clicked.connect(self.rename_box)
         box_btn_layout.addWidget(rename_box_btn)
 
@@ -1253,46 +1253,59 @@ class WaferWidget(QWidget):
         dialog.exec()
 
     def rename_box(self):
-        """Rename the selected box."""
+        """Edit name and notes of the selected box."""
         items = self.box_list.selectedItems()
         if not items:
-            QMessageBox.warning(self, "Error", "Please select a box to rename")
+            QMessageBox.warning(self, "Error", "Please select a box to edit")
             return
 
         box_id = items[0].data(Qt.UserRole)
-        old_name = items[0].text().split(" (")[0]
+        # Fetch current values from DB so notes are pre-filled correctly
+        boxes = db.get_all_boxes()
+        current = next((b for b in boxes if b["box_id"] == box_id), None)
+        if current is None:
+            return
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("Rename Box")
-        dialog.setGeometry(100, 100, 300, 100)
+        dialog.setWindowTitle("Edit Box")
+        dialog.setMinimumWidth(320)
 
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel("New Name:"))
-        name_input = QLineEdit(old_name)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Name:"))
+        name_input = QLineEdit(current["name"])
         layout.addWidget(name_input)
 
+        layout.addWidget(QLabel("Notes:"))
+        notes_input = QTextEdit()
+        notes_input.setPlainText(current.get("notes", "") or "")
+        notes_input.setFixedHeight(80)
+        layout.addWidget(notes_input)
+
         btn_layout = QHBoxLayout()
-        ok_btn = QPushButton("Rename")
+        ok_btn = QPushButton("Save")
         cancel_btn = QPushButton("Cancel")
 
-        def rename():
+        def save():
             try:
                 if not name_input.text().strip():
                     QMessageBox.warning(dialog, "Error", "Name cannot be empty")
                     return
-                db.update_box(box_id, name=name_input.text().strip())
+                db.update_box(
+                    box_id,
+                    name=name_input.text().strip(),
+                    notes=notes_input.toPlainText().strip(),
+                )
                 dialog.accept()
                 self.load_boxes()
             except Exception as e:
                 QMessageBox.critical(dialog, "Database Error", str(e))
 
-        ok_btn.clicked.connect(rename)
+        ok_btn.clicked.connect(save)
         cancel_btn.clicked.connect(dialog.reject)
         btn_layout.addWidget(ok_btn)
         btn_layout.addWidget(cancel_btn)
         layout.addLayout(btn_layout)
 
-        dialog.setLayout(layout)
         dialog.exec()
 
     def delete_box(self):
