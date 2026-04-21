@@ -1072,10 +1072,12 @@ class WaferWidget(QWidget):
         """Reload all data from the database."""
         self.load_boxes()
         if self.current_box_id is not None:
-            self.load_grid(self.current_box_id)
+            self.load_grid()
         if self.current_wafer_id is not None:
-            self.load_flakes_for_wafer(self.current_wafer_id)
-            self.load_ref_points()
+            wafer = db.get_wafer_by_id(self.current_wafer_id)
+            if wafer is not None:
+                self.load_flakes_for_wafer(wafer)
+                self.load_ref_points(wafer)
 
     def load_boxes(self):
         """Load all wafer boxes into the list."""

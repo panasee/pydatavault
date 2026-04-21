@@ -307,6 +307,12 @@ def get_all_flakes() -> list[dict]:
         return conn.execute("SELECT * FROM flakes ORDER BY flake_id").fetchall()
 
 
+def count_flakes() -> int:
+    with get_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) as cnt FROM flakes").fetchone()
+        return row["cnt"] if row else 0
+
+
 def update_flake(flake_id: str, **kwargs):
     allowed = {"wafer_id", "material", "thickness", "magnification",
                "photo_path", "coord_x", "coord_y", "status",
@@ -397,6 +403,12 @@ def get_device(device_id: str) -> Optional[dict]:
 def get_all_devices() -> list[dict]:
     with get_conn() as conn:
         return conn.execute("SELECT * FROM devices ORDER BY device_id").fetchall()
+
+
+def count_devices() -> int:
+    with get_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) as cnt FROM devices").fetchone()
+        return row["cnt"] if row else 0
 
 
 def update_device(device_id: str, **kwargs):
