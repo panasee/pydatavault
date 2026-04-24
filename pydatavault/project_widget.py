@@ -545,9 +545,20 @@ class NewDeviceDialog(QDialog):
 
             meas_target = config.PYFLEXLAB_OUT_PATH / device_id
 
-            db.create_device(
+            # Initialise measurement folder before writing DB state so failures
+            # do not leave a device record without backing measurement setup.
+            try:
+                from pyflexlab.file_organizer import FileOrganizer
+                FileOrganizer(device_id)
+            except Exception as e:
+                raise RuntimeError(f"Failed to initialise measurement folder via pyflexlab: {e}")
+
+            fab_dir.mkdir(parents=True, exist_ok=True)
+
+            db.create_device_with_layers(
                 device_id,
                 self.project_id,
+                self.layers,
                 description=description,
                 fab_date=fab_date,
                 status="planned",
@@ -555,15 +566,6 @@ class NewDeviceDialog(QDialog):
                 meas_path=str(meas_target),
                 notes=""
             )
-
-            fab_dir.mkdir(parents=True, exist_ok=True)
-
-            # Initialise measurement folder via pyflexlab (already imported at config time)
-            try:
-                from pyflexlab.file_organizer import FileOrganizer
-                FileOrganizer(device_id)
-            except Exception as e:
-                raise RuntimeError(f"Failed to initialise measurement folder via pyflexlab: {e}")
 
             # Symlink from project tree → pyflexlab data directory
             meas_link = config.PROJECTS_DIR / self.project_id / "measurements" / device_id
@@ -574,19 +576,6 @@ class NewDeviceDialog(QDialog):
                     f"Could not create symlink to measurement folder:\n{e}\n\n"
                     "The device was created and the measurement folder exists, "
                     "but you will need to navigate to it manually."
-                )
-
-            for order_index, layer in enumerate(self.layers):
-                db.add_device_layer(
-                    device_id,
-                    layer['layer_name'],
-                    layer['flake_id'],
-                    order_index
-                )
-                db.update_flake(
-                    layer['flake_id'],
-                    status="used",
-                    used_in_device=device_id,
                 )
 
             super().accept()
@@ -689,6 +678,13 @@ class EditDeviceDialog(QDialog):
                 description=self.desc_edit.text(),
                 fab_date=self.fab_date_edit.text(),
                 status=self.status_combo.currentText()
+            )
+            new_layers = [layer for layer in self.layers if not layer.get('id')]
+            existing_count = len(self.layers) - len(new_layers)
+            db.add_device_layers_and_mark_flakes(
+                self.device['device_id'],
+                new_layers,
+                start_index=existing_count,
             )
 
             super().accept()

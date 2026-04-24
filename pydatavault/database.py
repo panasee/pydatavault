@@ -124,17 +124,15 @@ def _migrate():
     #     the material/thickness history.
     #
     # SQLite does not support ALTER COLUMN, so we rebuild the table.
-    _CORRECT_POLICY = "ON DELETE SET NULL"
-    _WRONG_POLICY   = "ON DELETE CASCADE"
-
     with get_conn() as conn:
-        row = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='flakes'"
-        ).fetchone()
-        sql = (row.get("sql") or "") if row else ""
-        # Only migrate when the wrong policy is currently in place.
+        fk_rows = conn.execute("PRAGMA foreign_key_list(flakes)").fetchall()
+        wafer_fk = next(
+            (row for row in fk_rows if row.get("from") == "wafer_id"),
+            None,
+        )
+        # Only migrate when the wafer_id policy is currently wrong.
         # (A brand-new DB created from SCHEMA will already have SET NULL.)
-        if _WRONG_POLICY in sql and _CORRECT_POLICY not in sql:
+        if wafer_fk and wafer_fk.get("on_delete") != "SET NULL":
             conn.executescript("""
                 PRAGMA foreign_keys = OFF;
 
@@ -193,6 +191,13 @@ def update_box(box_id: int, **kwargs):
 
 def delete_box(box_id: int):
     with get_conn() as conn:
+        conn.execute(
+            """DELETE FROM flakes
+               WHERE status='available'
+                 AND wafer_id IN (
+                     SELECT wafer_id FROM wafers WHERE box_id=?
+                 )""",
+            (box_id,))
         conn.execute("DELETE FROM wafer_boxes WHERE box_id=?", (box_id,))
 
 
@@ -386,6 +391,37 @@ def create_device(device_id: str, project_id: str, description: str = "",
         return device_id
 
 
+def create_device_with_layers(device_id: str, project_id: str,
+                              layers: list[dict],
+                              description: str = "",
+                              fab_date: str = "",
+                              status: str = "planned",
+                              fab_path: str = "",
+                              meas_path: str = "",
+                              notes: str = "") -> str:
+    """Create a device and consume its flakes in one transaction."""
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO devices
+               (device_id, project_id, description, fab_date, status,
+                fab_path, meas_path, notes)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (device_id, project_id, description, fab_date, status,
+             fab_path, meas_path, notes))
+        for order_index, layer in enumerate(layers):
+            conn.execute(
+                """INSERT INTO device_layers
+                   (device_id, layer_name, flake_id, order_index)
+                   VALUES (?,?,?,?)""",
+                (device_id, layer['layer_name'], layer['flake_id'], order_index))
+            conn.execute(
+                """UPDATE flakes
+                   SET status='used', used_in_device=?
+                   WHERE flake_id=?""",
+                (device_id, layer['flake_id']))
+        return device_id
+
+
 def get_devices_for_project(project_id: str) -> list[dict]:
     with get_conn() as conn:
         return conn.execute(
@@ -453,6 +489,26 @@ def get_device_layers(device_id: str) -> list[dict]:
 def delete_device_layer(layer_id: int):
     with get_conn() as conn:
         conn.execute("DELETE FROM device_layers WHERE id=?", (layer_id,))
+
+
+def add_device_layers_and_mark_flakes(device_id: str, layers: list[dict],
+                                      start_index: int = 0):
+    """Append layers to a device and mark their flakes as used atomically."""
+    if not layers:
+        return
+    with get_conn() as conn:
+        for offset, layer in enumerate(layers):
+            conn.execute(
+                """INSERT INTO device_layers
+                   (device_id, layer_name, flake_id, order_index)
+                   VALUES (?,?,?,?)""",
+                (device_id, layer['layer_name'], layer['flake_id'],
+                 start_index + offset))
+            conn.execute(
+                """UPDATE flakes
+                   SET status='used', used_in_device=?
+                   WHERE flake_id=?""",
+                (device_id, layer['flake_id']))
 
 
 # ── Queries ─────────────────────────────────────────────────────────────
