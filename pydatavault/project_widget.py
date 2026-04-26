@@ -16,6 +16,7 @@ from PySide6.QtCore import QSize
 
 from . import database as db
 from . import config
+from . import style
 
 
 class StatusDelegate(QStyledItemDelegate):
@@ -45,6 +46,8 @@ class ProjectWidget(QWidget):
     def init_ui(self):
         """Initialize the user interface."""
         layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
 
         splitter = QSplitter(Qt.Horizontal)
 
@@ -62,24 +65,33 @@ class ProjectWidget(QWidget):
     def create_left_panel(self):
         """Create the left panel with project list."""
         panel = QWidget()
+        style.decorate_panel(panel, "sidePanel")
         layout = QVBoxLayout()
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
 
-        layout.addWidget(QLabel("Projects:"))
+        title = QLabel("Projects")
+        style.decorate_heading(title)
+        layout.addWidget(title)
 
         self.project_list = QListWidget()
+        style.decorate_list(self.project_list)
         self.project_list.itemSelectionChanged.connect(self.on_project_selected)
         layout.addWidget(self.project_list)
 
         btn_layout = QVBoxLayout()
         self.btn_new_project = QPushButton("New Project")
+        style.decorate_button(self.btn_new_project, "primary", "plus")
         self.btn_new_project.clicked.connect(self.on_new_project)
         btn_layout.addWidget(self.btn_new_project)
 
         self.btn_edit_project = QPushButton("Edit Project")
+        style.decorate_button(self.btn_edit_project, "neutral", "edit")
         self.btn_edit_project.clicked.connect(self.on_edit_project)
         btn_layout.addWidget(self.btn_edit_project)
 
         self.btn_delete_project = QPushButton("Delete Project")
+        style.decorate_button(self.btn_delete_project, "danger", "delete")
         self.btn_delete_project.clicked.connect(self.on_delete_project)
         btn_layout.addWidget(self.btn_delete_project)
 
@@ -90,12 +102,17 @@ class ProjectWidget(QWidget):
     def create_right_panel(self):
         """Create the right panel with device management."""
         panel = QWidget()
+        style.decorate_panel(panel, "contentPanel")
         layout = QVBoxLayout()
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
 
         self.project_header = QLabel("Select a project")
+        style.decorate_heading(self.project_header)
         layout.addWidget(self.project_header)
 
         self.device_table = QTableWidget()
+        style.decorate_table(self.device_table)
         self.device_table.setColumnCount(7)
         self.device_table.setHorizontalHeaderLabels(
             ["Device ID", "Description", "Fab Date", "Status", "Layers", "Meas Date", "Notes"]
@@ -112,23 +129,29 @@ class ProjectWidget(QWidget):
         layout.addWidget(self.device_table)
 
         btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(8)
         self.btn_new_device = QPushButton("New Device")
+        style.decorate_button(self.btn_new_device, "primary", "plus")
         self.btn_new_device.clicked.connect(self.on_new_device)
         btn_layout.addWidget(self.btn_new_device)
 
         self.btn_edit_device = QPushButton("Edit Device")
+        style.decorate_button(self.btn_edit_device, "neutral", "edit")
         self.btn_edit_device.clicked.connect(self.on_edit_device)
         btn_layout.addWidget(self.btn_edit_device)
 
         self.btn_delete_device = QPushButton("Delete Device")
+        style.decorate_button(self.btn_delete_device, "danger", "delete")
         self.btn_delete_device.clicked.connect(self.on_delete_device)
         btn_layout.addWidget(self.btn_delete_device)
 
         self.btn_fab_folder = QPushButton("Open Fab Folder")
+        style.decorate_button(self.btn_fab_folder, "utility", "folder")
         self.btn_fab_folder.clicked.connect(self.on_open_fab_folder)
         btn_layout.addWidget(self.btn_fab_folder)
 
         self.btn_meas_folder = QPushButton("Open Meas Folder")
+        style.decorate_button(self.btn_meas_folder, "utility", "folder")
         self.btn_meas_folder.clicked.connect(self.on_open_meas_folder)
         btn_layout.addWidget(self.btn_meas_folder)
 
@@ -181,6 +204,7 @@ class ProjectWidget(QWidget):
             self.device_table.setItem(row, 2, QTableWidgetItem(device['fab_date'] or ""))
 
             status_item = QTableWidgetItem(device['status'] or "planned")
+            style.decorate_status_item(status_item, device['status'])
             self.device_table.setItem(row, 3, status_item)
 
             layer_count = device.get('layer_count', 0)
@@ -496,12 +520,14 @@ class NewDeviceDialog(QDialog):
         layout.addWidget(QLabel("Layers:"))
 
         self.layers_table = QTableWidget()
+        style.decorate_table(self.layers_table)
         self.layers_table.setColumnCount(4)
         self.layers_table.setHorizontalHeaderLabels(["Order", "Layer Name", "Flake ID", "Material"])
         self.layers_table.setMaximumHeight(150)
         layout.addWidget(self.layers_table)
 
         btn_add_layer = QPushButton("Add Layer")
+        style.decorate_button(btn_add_layer, "utility", "plus")
         btn_add_layer.clicked.connect(self.on_add_layer)
         layout.addWidget(btn_add_layer)
 
@@ -623,12 +649,14 @@ class EditDeviceDialog(QDialog):
         layout.addWidget(QLabel("Layers:"))
 
         self.layers_table = QTableWidget()
+        style.decorate_table(self.layers_table)
         self.layers_table.setColumnCount(4)
         self.layers_table.setHorizontalHeaderLabels(["Order", "Layer Name", "Flake ID", "Material"])
         self.layers_table.setMaximumHeight(150)
         layout.addWidget(self.layers_table)
 
         btn_add_layer = QPushButton("Add Layer")
+        style.decorate_button(btn_add_layer, "utility", "plus")
         btn_add_layer.clicked.connect(self.on_add_layer)
         layout.addWidget(btn_add_layer)
 

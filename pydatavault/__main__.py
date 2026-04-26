@@ -5,6 +5,7 @@ from PySide6.QtWidgets import QApplication
 
 from . import config
 from . import database as db
+from . import style
 from .main_window import MainWindow
 
 
@@ -18,6 +19,7 @@ def main():
 
     # Create the application
     app = QApplication(sys.argv)
+    style.apply_app_style(app)
 
     # Create and show the main window
     window = MainWindow()

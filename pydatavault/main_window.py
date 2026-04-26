@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt
 
 from . import config
 from . import database as db
+from . import style
 from .wafer_widget import WaferWidget
 from .project_widget import ProjectWidget
 
@@ -21,6 +22,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PyDataVault")
+        self.setWindowIcon(style.app_icon())
         self.resize(1400, 900)
 
         # Initialize database and widgets
@@ -29,8 +31,8 @@ class MainWindow(QMainWindow):
 
         # Create tab widget as central widget
         self.tabs = QTabWidget()
-        self.tabs.addTab(self.wafer_widget, "Wafers / Flakes")
-        self.tabs.addTab(self.project_widget, "Projects / Devices")
+        self.tabs.addTab(self.wafer_widget, style.symbol_icon("wafer"), "Wafers / Flakes")
+        self.tabs.addTab(self.project_widget, style.symbol_icon("projects"), "Projects / Devices")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.setCentralWidget(self.tabs)
 
@@ -48,10 +50,10 @@ class MainWindow(QMainWindow):
         # File menu
         file_menu = menubar.addMenu("File")
 
-        open_db_action = file_menu.addAction("Open Database Folder")
+        open_db_action = file_menu.addAction(style.symbol_icon("folder"), "Open Database Folder")
         open_db_action.triggered.connect(self._open_database_folder)
 
-        refresh_action = file_menu.addAction("Refresh All")
+        refresh_action = file_menu.addAction(style.symbol_icon("refresh"), "Refresh All")
         refresh_action.triggered.connect(self._refresh_all)
 
         file_menu.addSeparator()
@@ -62,7 +64,7 @@ class MainWindow(QMainWindow):
         # Help menu
         help_menu = menubar.addMenu("Help")
 
-        about_action = help_menu.addAction("About")
+        about_action = help_menu.addAction(style.symbol_icon("info"), "About")
         about_action.triggered.connect(self._show_about)
 
     def _open_database_folder(self):

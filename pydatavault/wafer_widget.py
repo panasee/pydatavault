@@ -18,6 +18,7 @@ from PySide6.QtGui import (
 from . import database as db
 from . import config
 from . import coord_utils
+from . import style
 
 
 class WaferGridView(QWidget):
@@ -71,15 +72,22 @@ class WaferGridView(QWidget):
     def paintEvent(self, event):
         """Paint the wafer grid."""
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(240, 240, 240))
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#f8fafc"))
 
         if self.rows == 0 or self.cols == 0:
+            painter.setPen(QPen(QColor("#64748b")))
             painter.drawText(self.rect(), Qt.AlignCenter, "No box selected")
             return
 
         cell_size = self._get_cell_size()
         label_width = 40
         label_height = 30
+
+        label_font = QFont("Segoe UI", 9)
+        label_font.setBold(True)
+        painter.setFont(label_font)
+        painter.setPen(QPen(QColor("#64748b")))
 
         # Draw column labels (1, 2, 3, ...)
         for col in range(self.cols):
@@ -101,37 +109,42 @@ class WaferGridView(QWidget):
             )
 
         # Draw grid cells
+        count_font = QFont("Segoe UI", 11)
+        count_font.setBold(True)
         for row in range(self.rows):
             for col in range(self.cols):
                 x = label_width + col * cell_size
                 y = label_height + row * cell_size
-                rect = QRect(x, y, cell_size, cell_size)
+                rect = QRectF(x + 3, y + 3, cell_size - 6, cell_size - 6)
 
                 # Determine cell color
                 count = self.flake_counts.get((row, col), 0)
                 if count == 0:
-                    brush = QBrush(QColor(220, 220, 220))
+                    fill = QColor("#eef2f7")
+                    text_color = QColor("#64748b")
                 elif count == 1:
-                    brush = QBrush(QColor(100, 200, 100))
+                    fill = QColor("#dcfce7")
+                    text_color = QColor("#047857")
                 else:
-                    brush = QBrush(QColor(100, 150, 200))
+                    fill = QColor("#dbeafe")
+                    text_color = QColor("#1d4ed8")
 
-                painter.fillRect(rect, brush)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(fill))
+                painter.drawRoundedRect(rect, 7, 7)
 
                 # Draw border
                 is_selected = self.selected_cell == (row, col)
-                pen_color = QColor(0, 0, 0) if is_selected else QColor(100, 100, 100)
-                pen_width = 3 if is_selected else 1
+                pen_color = QColor("#2563eb") if is_selected else QColor("#cbd5e1")
+                pen_width = 2.5 if is_selected else 1
                 painter.setPen(QPen(pen_color, pen_width))
-                painter.drawRect(rect)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRoundedRect(rect, 7, 7)
 
                 # Draw count
                 if count > 0:
-                    font = QFont()
-                    font.setPointSize(12)
-                    font.setBold(True)
-                    painter.setFont(font)
-                    painter.setPen(QPen(QColor(0, 0, 0)))
+                    painter.setFont(count_font)
+                    painter.setPen(QPen(text_color))
                     painter.drawText(rect, Qt.AlignCenter, str(count))
 
     def _get_cell_size(self) -> int:
@@ -207,6 +220,7 @@ class AddFlakeDialog(QDialog):
         self.photo_label = QLabel("No photo selected")
         photo_layout.addWidget(self.photo_label)
         photo_btn = QPushButton("Browse...")
+        style.decorate_button(photo_btn, "utility", "folder")
         photo_btn.clicked.connect(self.select_photo)
         photo_layout.addWidget(photo_btn)
         layout.addLayout(photo_layout)
@@ -220,8 +234,10 @@ class AddFlakeDialog(QDialog):
         # Buttons
         btn_layout = QHBoxLayout()
         ok_btn = QPushButton("Create")
+        style.decorate_button(ok_btn, "primary", "plus")
         ok_btn.clicked.connect(self.accept)
         cancel_btn = QPushButton("Cancel")
+        style.decorate_button(cancel_btn)
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(ok_btn)
         btn_layout.addWidget(cancel_btn)
@@ -269,15 +285,19 @@ class RefPointSlot(QWidget):
         self.thumb = QLabel()
         self.thumb.setFixedSize(120, 90)
         self.thumb.setAlignment(Qt.AlignCenter)
-        self.thumb.setStyleSheet("border: 1px solid #aaa; background: #f5f5f5;")
+        self.thumb.setStyleSheet(
+            "border: 1px solid #cfd8e3; border-radius: 8px; background: #f8fafc;"
+        )
         self._update_thumb()
         outer.addWidget(self.thumb)
 
         photo_btn = QPushButton("Set Photo…")
+        style.decorate_button(photo_btn, "utility", "photo")
         photo_btn.clicked.connect(self._pick_photo)
         outer.addWidget(photo_btn)
 
         clear_btn = QPushButton("Clear Slot")
+        style.decorate_button(clear_btn, "danger", "delete")
         clear_btn.clicked.connect(self._clear)
         outer.addWidget(clear_btn)
 
@@ -385,9 +405,11 @@ class RefPointsDialog(QDialog):
         # Buttons
         btn_layout = QHBoxLayout()
         ok_btn = QPushButton("Save")
+        style.decorate_button(ok_btn, "primary")
         ok_btn.setDefault(True)
         ok_btn.clicked.connect(self._save)
         cancel_btn = QPushButton("Cancel")
+        style.decorate_button(cancel_btn)
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addStretch()
         btn_layout.addWidget(ok_btn)
@@ -829,6 +851,7 @@ class CoordTransformDialog(QDialog):
 
         right.addStretch()
         close_btn = QPushButton("Close")
+        style.decorate_button(close_btn)
         close_btn.clicked.connect(self.accept)
         right.addWidget(close_btn)
 
@@ -970,51 +993,73 @@ class WaferWidget(QWidget):
     def init_ui(self):
         """Initialize the user interface."""
         main_layout = QHBoxLayout()
+        main_layout.setContentsMargins(14, 14, 14, 14)
+        main_layout.setSpacing(12)
 
         # Left panel - Box list
         left_layout = QVBoxLayout()
-        left_layout.addWidget(QLabel("Wafer Boxes"))
+        left_layout.setContentsMargins(14, 14, 14, 14)
+        left_layout.setSpacing(10)
+        box_title = QLabel("Wafer Boxes")
+        style.decorate_heading(box_title)
+        left_layout.addWidget(box_title)
 
         self.box_list = QListWidget()
+        style.decorate_list(self.box_list)
         self.box_list.itemSelectionChanged.connect(self.on_box_selected)
         left_layout.addWidget(self.box_list)
 
         box_btn_layout = QVBoxLayout()
         add_box_btn = QPushButton("Add Box")
+        style.decorate_button(add_box_btn, "primary", "plus")
         add_box_btn.clicked.connect(self.add_box)
         box_btn_layout.addWidget(add_box_btn)
 
         rename_box_btn = QPushButton("Edit Box")
+        style.decorate_button(rename_box_btn, "neutral", "edit")
         rename_box_btn.clicked.connect(self.rename_box)
         box_btn_layout.addWidget(rename_box_btn)
 
         delete_box_btn = QPushButton("Delete Box")
+        style.decorate_button(delete_box_btn, "danger", "delete")
         delete_box_btn.clicked.connect(self.delete_box)
         box_btn_layout.addWidget(delete_box_btn)
 
         left_layout.addLayout(box_btn_layout)
 
         left_widget = QWidget()
+        style.decorate_panel(left_widget, "sidePanel")
         left_widget.setLayout(left_layout)
 
         # Center panel - Wafer grid
         center_layout = QVBoxLayout()
-        center_layout.addWidget(QLabel("Wafer Grid"))
+        center_layout.setContentsMargins(14, 14, 14, 14)
+        center_layout.setSpacing(10)
+        grid_title = QLabel("Wafer Grid")
+        style.decorate_heading(grid_title)
+        center_layout.addWidget(grid_title)
         self.grid_view = WaferGridView()
         self.grid_view.cell_clicked.connect(self.on_cell_clicked)
         center_layout.addWidget(self.grid_view)
         center_widget = QWidget()
+        style.decorate_panel(center_widget, "gridPanel")
         center_widget.setLayout(center_layout)
 
         # Right panel - Flake details
         right_layout = QVBoxLayout()
+        right_layout.setContentsMargins(14, 14, 14, 14)
+        right_layout.setSpacing(10)
         self.wafer_header = QLabel("No wafer selected")
+        style.decorate_heading(self.wafer_header)
         right_layout.addWidget(self.wafer_header)
 
         # Reference points section
         ref_header = QHBoxLayout()
-        ref_header.addWidget(QLabel("Reference Points:"))
+        ref_label = QLabel("Reference Points")
+        ref_label.setProperty("subtle", True)
+        ref_header.addWidget(ref_label)
         edit_ref_btn = QPushButton("Edit…")
+        style.decorate_button(edit_ref_btn, "utility", "edit")
         edit_ref_btn.setFixedWidth(60)
         edit_ref_btn.clicked.connect(self.edit_ref_points)
         ref_header.addWidget(edit_ref_btn)
@@ -1025,8 +1070,11 @@ class WaferWidget(QWidget):
         right_layout.addWidget(self.ref_points_label)
 
         # Flake table
-        right_layout.addWidget(QLabel("Flakes:"))
+        flake_label = QLabel("Flakes")
+        flake_label.setProperty("subtle", True)
+        right_layout.addWidget(flake_label)
         self.flake_table = QTableWidget()
+        style.decorate_table(self.flake_table)
         self.flake_table.setColumnCount(6)
         self.flake_table.setHorizontalHeaderLabels(
             ["ID", "Material", "Thickness", "Magnification", "Status", "Notes"]
@@ -1037,25 +1085,31 @@ class WaferWidget(QWidget):
 
         # Flake buttons
         flake_btn_layout = QHBoxLayout()
+        flake_btn_layout.setSpacing(8)
         add_flake_btn = QPushButton("Add Flake")
+        style.decorate_button(add_flake_btn, "primary", "plus")
         add_flake_btn.clicked.connect(self.add_flake)
         flake_btn_layout.addWidget(add_flake_btn)
 
         delete_flake_btn = QPushButton("Delete Flake")
+        style.decorate_button(delete_flake_btn, "danger", "delete")
         delete_flake_btn.clicked.connect(self.delete_flake)
         flake_btn_layout.addWidget(delete_flake_btn)
 
         view_photo_btn = QPushButton("View Photo")
+        style.decorate_button(view_photo_btn, "utility", "photo")
         view_photo_btn.clicked.connect(self.view_photo)
         flake_btn_layout.addWidget(view_photo_btn)
 
         transform_btn = QPushButton("Coordinate Transform")
+        style.decorate_button(transform_btn, "utility", "transform")
         transform_btn.clicked.connect(self.show_transform_dialog)
         flake_btn_layout.addWidget(transform_btn)
 
         right_layout.addLayout(flake_btn_layout)
 
         right_widget = QWidget()
+        style.decorate_panel(right_widget, "contentPanel")
         right_widget.setLayout(right_layout)
 
         # Main splitter
@@ -1151,7 +1205,9 @@ class WaferWidget(QWidget):
                 self.flake_table.setItem(i, 1, QTableWidgetItem(flake.get('material', '')))
                 self.flake_table.setItem(i, 2, QTableWidgetItem(flake.get('thickness', '')))
                 self.flake_table.setItem(i, 3, QTableWidgetItem(flake.get('magnification', '')))
-                self.flake_table.setItem(i, 4, QTableWidgetItem(flake.get('status', '')))
+                status_item = QTableWidgetItem(flake.get('status', ''))
+                style.decorate_status_item(status_item, flake.get('status', ''))
+                self.flake_table.setItem(i, 4, status_item)
                 self.flake_table.setItem(i, 5, QTableWidgetItem(flake.get('notes', '')))
 
                 # Store flake_id in row
@@ -1226,7 +1282,9 @@ class WaferWidget(QWidget):
 
         btn_layout = QHBoxLayout()
         ok_btn = QPushButton("Create")
+        style.decorate_button(ok_btn, "primary", "plus")
         cancel_btn = QPushButton("Cancel")
+        style.decorate_button(cancel_btn)
 
         def create_box():
             try:
@@ -1285,7 +1343,9 @@ class WaferWidget(QWidget):
 
         btn_layout = QHBoxLayout()
         ok_btn = QPushButton("Save")
+        style.decorate_button(ok_btn, "primary")
         cancel_btn = QPushButton("Cancel")
+        style.decorate_button(cancel_btn)
 
         def save():
             try:
