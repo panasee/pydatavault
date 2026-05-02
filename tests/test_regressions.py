@@ -21,6 +21,7 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         os.environ["VAULT_DB_PATH"] = str(cls.root_path)
         cls.config = importlib.import_module("pydatavault.config")
         cls.db = importlib.import_module("pydatavault.database")
+        cls.main_window = importlib.import_module("pydatavault.main_window")
         cls.wafer_widget = importlib.import_module("pydatavault.wafer_widget")
         cls.project_widget = importlib.import_module("pydatavault.project_widget")
         from PySide6.QtWidgets import QApplication
@@ -45,6 +46,20 @@ class PyDataVaultRegressionTests(unittest.TestCase):
 
         self.assertEqual(self.db.count_flakes(), 1)
         self.assertEqual(self.db.count_devices(), 1)
+
+    def test_about_dialog_formats_database_path_as_text(self):
+        parent = object()
+
+        with mock.patch.object(self.main_window.QMessageBox, "about") as about:
+            self.main_window.MainWindow._show_about(parent)
+
+        about.assert_called_once()
+        self.assertEqual(about.call_args.args[0], parent)
+        self.assertEqual(about.call_args.args[1], "About PyDataVault")
+        self.assertIn(
+            f"Database location: {self.config.ROOT_PATH}",
+            about.call_args.args[2],
+        )
 
     def test_wafer_widget_refresh_reloads_current_selection(self):
         wafer = {"wafer_id": 1, "row": 0, "col": 0, "label": "", "ref_points": "[]"}

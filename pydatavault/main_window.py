@@ -98,7 +98,7 @@ class MainWindow(QMainWindow):
             "About PyDataVault",
             "PyDataVault v0.1.0\n\n"
             "A PySide6 application for managing lab data and experiments.\n\n"
-            "Database location: " + config.ROOT_PATH,
+            f"Database location: {config.ROOT_PATH}",
         )
 
     def _update_status_bar(self):
