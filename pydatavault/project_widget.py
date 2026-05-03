@@ -1,5 +1,7 @@
+import logging
 import os
 import shutil
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -17,6 +19,8 @@ from PySide6.QtCore import QSize
 from . import database as db
 from . import config
 from . import style
+
+logger = logging.getLogger("PyOmnix")
 
 
 class StatusDelegate(QStyledItemDelegate):
@@ -337,7 +341,7 @@ class ProjectWidget(QWidget):
             try:
                 fab_dir = config.PROJECTS_DIR / self.current_project_id / "fabrication" / device_id
                 if fab_dir.exists():
-                    shutil.rmtree(fab_dir)
+                    ProjectWidget._remove_directory_best_effort(fab_dir)
 
                 meas_link = config.PROJECTS_DIR / self.current_project_id / "measurements" / device_id
                 if meas_link.exists() or meas_link.is_symlink():
@@ -348,6 +352,27 @@ class ProjectWidget(QWidget):
                 QMessageBox.information(self, "Success", "Device deleted")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to delete device: {str(e)}")
+
+    @staticmethod
+    def _remove_directory_best_effort(path: Path):
+        """Remove an app-managed directory without blocking database cleanup."""
+        for attempt in range(3):
+            try:
+                shutil.rmtree(path, onexc=ProjectWidget._make_writable_and_retry)
+                return
+            except PermissionError:
+                if attempt == 2:
+                    logger.warning("Could not remove directory: %s", path, exc_info=True)
+                    return
+                time.sleep(0.1)
+            except OSError:
+                logger.warning("Could not remove directory: %s", path, exc_info=True)
+                return
+
+    @staticmethod
+    def _make_writable_and_retry(function, path, excinfo):
+        os.chmod(path, 0o700)
+        function(path)
 
     def on_open_fab_folder(self):
         """Open fabrication folder for selected device."""

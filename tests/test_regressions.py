@@ -898,6 +898,55 @@ class PyDataVaultRegressionTests(unittest.TestCase):
 
         self.assertIsNone(self.db.get_device("device-fail"))
 
+    def test_delete_device_ignores_fabrication_directory_access_denied(self):
+        self.db.create_project("proj-delete", "Project Delete")
+        self.db.create_device("device-denied", "proj-delete")
+        fab_dir = (
+            self.config.PROJECTS_DIR
+            / "proj-delete"
+            / "fabrication"
+            / "device-denied"
+        )
+        fab_dir.mkdir(parents=True, exist_ok=True)
+
+        class DummyItem:
+            def text(self):
+                return "device-denied"
+
+        class DummyTable:
+            def currentRow(self):
+                return 0
+
+            def item(self, row, col):
+                return DummyItem()
+
+        class DummyWidget:
+            current_project_id = "proj-delete"
+            device_table = DummyTable()
+
+            def load_devices(self, project_id):
+                pass
+
+        with mock.patch.object(
+            self.project_widget.QMessageBox,
+            "question",
+            return_value=self.project_widget.QMessageBox.Yes,
+        ), mock.patch.object(
+            self.project_widget.QMessageBox,
+            "critical",
+        ) as critical, mock.patch.object(
+            self.project_widget.QMessageBox,
+            "information",
+        ), mock.patch.object(
+            self.project_widget.shutil,
+            "rmtree",
+            side_effect=PermissionError(5, "Access is denied", str(fab_dir)),
+        ):
+            self.project_widget.ProjectWidget.on_delete_device(DummyWidget())
+
+        self.assertIsNone(self.db.get_device("device-denied"))
+        critical.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
