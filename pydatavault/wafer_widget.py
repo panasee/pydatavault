@@ -1,7 +1,9 @@
 import json
 import logging
 import math
+import os
 import shutil
+import time
 from pathlib import Path
 from typing import Optional, Dict, List
 
@@ -11,9 +13,9 @@ from PySide6.QtWidgets import (
     QSpinBox, QDoubleSpinBox, QTextEdit, QMessageBox, QFileDialog,
     QHeaderView, QComboBox, QSizePolicy, QFormLayout, QDialogButtonBox
 )
-from PySide6.QtCore import Qt, Signal, QSize, QRect, QPoint, QPointF, QRectF
+from PySide6.QtCore import Qt, Signal, QSize, QRect, QPoint, QPointF, QRectF, QUrl
 from PySide6.QtGui import (
-    QColor, QPainter, QBrush, QPen, QFont, QPixmap, QPolygonF
+    QColor, QPainter, QBrush, QPen, QFont, QPixmap, QPolygonF, QDesktopServices
 )
 
 from . import database as db
@@ -1613,7 +1615,9 @@ class WaferWidget(QWidget):
 
         if reply == QMessageBox.Yes:
             try:
+                flake = db.get_flake(flake_uid)
                 db.delete_flake(flake_uid)
+                WaferWidget._delete_managed_flake_files(flake_uid, flake)
                 wafer = db.get_wafer_by_id(self.current_wafer_id)
                 if wafer is not None:
                     self.load_flakes_for_wafer(wafer)
@@ -1621,6 +1625,48 @@ class WaferWidget(QWidget):
             except Exception as e:
                 logger.exception("Failed to delete flake")
                 QMessageBox.critical(self, "Database Error", f"Failed to delete flake: {str(e)}")
+
+    @staticmethod
+    def _delete_managed_flake_files(flake_uid: int, flake: dict | None):
+        """Remove files copied into PyDataVault's managed flake directory."""
+        if not flake or not flake.get('photo_path'):
+            return
+
+        managed_dir = (config.FLAKES_DIR / str(flake_uid)).resolve()
+        flakes_root = config.FLAKES_DIR.resolve()
+        if managed_dir.parent != flakes_root or not managed_dir.exists():
+            return
+
+        photo_path = Path(flake['photo_path']).resolve()
+        if photo_path == managed_dir or managed_dir in photo_path.parents:
+            for attempt in range(3):
+                try:
+                    shutil.rmtree(
+                        managed_dir,
+                        onexc=WaferWidget._make_writable_and_retry,
+                    )
+                    return
+                except PermissionError:
+                    if attempt == 2:
+                        logger.warning(
+                            "Could not remove managed flake directory: %s",
+                            managed_dir,
+                            exc_info=True,
+                        )
+                        return
+                    time.sleep(0.1)
+                except OSError:
+                    logger.warning(
+                        "Could not remove managed flake directory: %s",
+                        managed_dir,
+                        exc_info=True,
+                    )
+                    return
+
+    @staticmethod
+    def _make_writable_and_retry(function, path, excinfo):
+        os.chmod(path, 0o700)
+        function(path)
 
     def view_photo(self):
         """Open the photo for the selected flake."""
@@ -1641,11 +1687,11 @@ class WaferWidget(QWidget):
 
             photo_path = Path(flake['photo_path'])
             if photo_path.exists():
-                import subprocess
-                subprocess.Popen(['xdg-open', str(photo_path)])
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(photo_path)))
             else:
                 QMessageBox.warning(self, "Error", "Photo file not found")
         except Exception as e:
+            logger.exception("Failed to view photo")
             QMessageBox.critical(self, "Error", f"Failed to view photo: {str(e)}")
 
     def edit_ref_points(self):

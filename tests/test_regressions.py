@@ -348,6 +348,42 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         finally:
             widget.close()
 
+    def test_view_photo_uses_qt_desktop_services_for_local_file(self):
+        box_id = self.db.create_box("Box View Photo")
+        wafer = self.db.get_or_create_wafer(box_id, 0, 0)
+        photo_path = self.root_path / "photo-view.png"
+        photo_path.write_bytes(b"fake image")
+        flake_uid = self.db.create_flake(
+            "bf1",
+            wafer["wafer_id"],
+            material="Graphene",
+            photo_path=str(photo_path),
+        )
+
+        widget = self.wafer_widget.WaferWidget()
+        try:
+            widget.current_wafer_id = wafer["wafer_id"]
+            widget.flake_table.setRowCount(1)
+            item = self.wafer_widget.QTableWidgetItem("bf1")
+            item.setData(self.wafer_widget.Qt.UserRole, flake_uid)
+            widget.flake_table.setItem(0, 0, item)
+            widget.flake_table.selectRow(0)
+
+            with mock.patch.object(
+                self.wafer_widget.QDesktopServices,
+                "openUrl",
+                return_value=True,
+            ) as open_url:
+                widget.view_photo()
+
+            open_url.assert_called_once()
+            self.assertEqual(
+                Path(open_url.call_args.args[0].toLocalFile()),
+                photo_path,
+            )
+        finally:
+            widget.close()
+
     def test_add_flake_refreshes_by_current_wafer_without_selected_grid_cell(self):
         box_id = self.db.create_box("Box Add Flake")
         wafer = self.db.get_or_create_wafer(box_id, 0, 0)
@@ -433,6 +469,116 @@ class PyDataVaultRegressionTests(unittest.TestCase):
 
         self.assertEqual(refreshed, [self.db.get_wafer_by_id(wafer["wafer_id"])])
         self.assertEqual(self.db.get_flake(flake_uid), None)
+
+    def test_delete_flake_removes_managed_photo_directory(self):
+        box_id = self.db.create_box("Box Delete Photo")
+        wafer = self.db.get_or_create_wafer(box_id, 0, 0)
+        flake_uid = self.db.create_flake("bf1", wafer["wafer_id"], material="Graphene")
+        flake_dir = self.config.FLAKES_DIR / str(flake_uid)
+        flake_dir.mkdir(parents=True, exist_ok=True)
+        photo_path = flake_dir / "flake.png"
+        photo_path.write_bytes(b"fake image")
+        self.db.update_flake(flake_uid, photo_path=str(photo_path))
+
+        class DummyItem:
+            def data(self, role):
+                return flake_uid
+
+            def text(self):
+                return "bf1"
+
+        class DummyTable:
+            def currentRow(self):
+                return 0
+
+            def item(self, row, col):
+                return DummyItem()
+
+        class DummyWidget:
+            current_box_id = box_id
+            current_wafer_id = wafer["wafer_id"]
+            grid_view = mock.Mock(selected_cell=None)
+            flake_table = DummyTable()
+
+            def load_flakes_for_wafer(self, wafer_dict):
+                pass
+
+            def load_grid(self):
+                pass
+
+        with mock.patch.object(
+            self.wafer_widget.QMessageBox,
+            "question",
+            return_value=self.wafer_widget.QMessageBox.Yes,
+        ):
+            self.wafer_widget.WaferWidget.delete_flake(DummyWidget())
+
+        self.assertIsNone(self.db.get_flake(flake_uid))
+        self.assertFalse(flake_dir.exists())
+
+    def test_delete_flake_does_not_remove_external_photo_path(self):
+        external_path = self.root_path / "external-original.png"
+        external_path.write_bytes(b"original image")
+
+        self.wafer_widget.WaferWidget._delete_managed_flake_files(
+            999,
+            {"photo_path": str(external_path)},
+        )
+
+        self.assertTrue(external_path.exists())
+
+    def test_delete_flake_ignores_managed_directory_access_denied(self):
+        box_id = self.db.create_box("Box Delete Locked Photo")
+        wafer = self.db.get_or_create_wafer(box_id, 0, 0)
+        flake_uid = self.db.create_flake("bf1", wafer["wafer_id"], material="Graphene")
+        flake_dir = self.config.FLAKES_DIR / str(flake_uid)
+        flake_dir.mkdir(parents=True, exist_ok=True)
+        photo_path = flake_dir / "flake.png"
+        photo_path.write_bytes(b"fake image")
+        self.db.update_flake(flake_uid, photo_path=str(photo_path))
+
+        class DummyItem:
+            def data(self, role):
+                return flake_uid
+
+            def text(self):
+                return "bf1"
+
+        class DummyTable:
+            def currentRow(self):
+                return 0
+
+            def item(self, row, col):
+                return DummyItem()
+
+        class DummyWidget:
+            current_box_id = box_id
+            current_wafer_id = wafer["wafer_id"]
+            grid_view = mock.Mock(selected_cell=None)
+            flake_table = DummyTable()
+
+            def load_flakes_for_wafer(self, wafer_dict):
+                pass
+
+            def load_grid(self):
+                pass
+
+        with mock.patch.object(
+            self.wafer_widget.QMessageBox,
+            "question",
+            return_value=self.wafer_widget.QMessageBox.Yes,
+        ), mock.patch.object(
+            self.wafer_widget.QMessageBox,
+            "critical",
+        ) as critical, mock.patch.object(
+            self.wafer_widget.shutil,
+            "rmtree",
+            side_effect=PermissionError(5, "Access is denied", str(flake_dir)),
+        ):
+            self.wafer_widget.WaferWidget.delete_flake(DummyWidget())
+
+        self.assertIsNone(self.db.get_flake(flake_uid))
+        critical.assert_not_called()
 
     def test_migration_repairs_flake_wafer_foreign_key_only(self):
         if self.config.DB_FILE.exists():
