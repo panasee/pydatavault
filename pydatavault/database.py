@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS flakes (
     thickness   TEXT DEFAULT '',
     magnification TEXT DEFAULT '',
     photo_path  TEXT DEFAULT '',
+    extra_photos TEXT DEFAULT '[]',
     coord_x     REAL DEFAULT 0.0,
     coord_y     REAL DEFAULT 0.0,
     status      TEXT NOT NULL DEFAULT 'available' CHECK(status IN ('available','used')),
@@ -141,6 +142,9 @@ def _migrate():
 
         if "material" not in wafer_columns:
             conn.execute("ALTER TABLE wafers ADD COLUMN material TEXT DEFAULT ''")
+        if "extra_photos" not in flake_columns:
+            conn.execute("ALTER TABLE flakes ADD COLUMN extra_photos TEXT DEFAULT '[]'")
+            flake_columns["extra_photos"] = {"name": "extra_photos"}
 
         if needs_flake_uid or needs_layer_uid or needs_wafer_policy:
             _rebuild_flake_schema(conn, flake_columns, layer_columns)
@@ -210,6 +214,7 @@ def _rebuild_flake_schema(conn, flake_columns: dict, layer_columns: dict):
                 thickness     TEXT DEFAULT '',
                 magnification TEXT DEFAULT '',
                 photo_path    TEXT DEFAULT '',
+                extra_photos  TEXT DEFAULT '[]',
                 coord_x       REAL DEFAULT 0.0,
                 coord_y       REAL DEFAULT 0.0,
                 status        TEXT NOT NULL DEFAULT 'available'
@@ -231,25 +236,27 @@ def _rebuild_flake_schema(conn, flake_columns: dict, layer_columns: dict):
         """)
 
         if "flake_uid" in flake_columns:
-            conn.execute("""
+            extra_select = "extra_photos" if "extra_photos" in flake_columns else "'[]'"
+            conn.execute(f"""
                 INSERT INTO flakes_new
                     (flake_uid, flake_id, wafer_id, material, thickness,
-                     magnification, photo_path, coord_x, coord_y, status,
-                     used_in_device, notes, created_at)
+                     magnification, photo_path, extra_photos, coord_x, coord_y,
+                     status, used_in_device, notes, created_at)
                 SELECT flake_uid, flake_id, wafer_id, material, thickness,
-                       magnification, photo_path, coord_x, coord_y, status,
-                       used_in_device, notes, created_at
+                       magnification, photo_path, {extra_select}, coord_x, coord_y,
+                       status, used_in_device, notes, created_at
                 FROM flakes
             """)
         else:
-            conn.execute("""
+            extra_select = "extra_photos" if "extra_photos" in flake_columns else "'[]'"
+            conn.execute(f"""
                 INSERT INTO flakes_new
                     (flake_id, wafer_id, material, thickness, magnification,
-                     photo_path, coord_x, coord_y, status, used_in_device,
-                     notes, created_at)
+                     photo_path, extra_photos, coord_x, coord_y, status,
+                     used_in_device, notes, created_at)
                 SELECT flake_id, wafer_id, material, thickness, magnification,
-                       photo_path, coord_x, coord_y, status, used_in_device,
-                       notes, created_at
+                       photo_path, {extra_select}, coord_x, coord_y, status,
+                       used_in_device, notes, created_at
                 FROM flakes
             """)
 
@@ -394,15 +401,16 @@ def get_wafer_by_id(wafer_id: int) -> Optional[dict]:
 def create_flake(flake_id: str, wafer_id: int, material: str = "",
                  thickness: str = "", magnification: str = "",
                  photo_path: str = "", coord_x: float = 0.0,
-                 coord_y: float = 0.0, notes: str = "") -> int:
+                 coord_y: float = 0.0, notes: str = "",
+                 extra_photos: str = "[]") -> int:
     with get_conn() as conn:
         cur = conn.execute(
             """INSERT INTO flakes
                (flake_id, wafer_id, material, thickness, magnification,
-                photo_path, coord_x, coord_y, notes)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+                photo_path, extra_photos, coord_x, coord_y, notes)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (flake_id, wafer_id, material, thickness, magnification,
-             photo_path, coord_x, coord_y, notes))
+             photo_path, extra_photos, coord_x, coord_y, notes))
         return cur.lastrowid
 
 
@@ -455,7 +463,7 @@ def count_flakes() -> int:
 
 def update_flake(flake_uid: int, **kwargs):
     allowed = {"wafer_id", "material", "thickness", "magnification",
-               "photo_path", "coord_x", "coord_y", "status",
+               "photo_path", "extra_photos", "coord_x", "coord_y", "status",
                "used_in_device", "notes"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
