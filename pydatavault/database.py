@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS wafers (
     row         INTEGER NOT NULL,
     col         INTEGER NOT NULL,
     label       TEXT DEFAULT '',
+    material    TEXT DEFAULT '',
     -- Up to 3 reference points stored as JSON list:
     -- [{"photo_path":"...", "x":..., "y":...}, ...]
     ref_points  TEXT DEFAULT '[]',
@@ -117,6 +118,10 @@ def _migrate():
     present before attempting it.
     """
     with get_conn() as conn:
+        wafer_columns = {
+            row["name"]: row
+            for row in conn.execute("PRAGMA table_info(wafers)").fetchall()
+        }
         flake_columns = {
             row["name"]: row
             for row in conn.execute("PRAGMA table_info(flakes)").fetchall()
@@ -133,6 +138,9 @@ def _migrate():
         needs_flake_uid = "flake_uid" not in flake_columns
         needs_layer_uid = "flake_uid" not in layer_columns
         needs_wafer_policy = wafer_fk and wafer_fk.get("on_delete") != "SET NULL"
+
+        if "material" not in wafer_columns:
+            conn.execute("ALTER TABLE wafers ADD COLUMN material TEXT DEFAULT ''")
 
         if needs_flake_uid or needs_layer_uid or needs_wafer_policy:
             _rebuild_flake_schema(conn, flake_columns, layer_columns)
@@ -337,7 +345,7 @@ def get_wafers_for_box(box_id: int) -> list[dict]:
 
 
 def update_wafer(wafer_id: int, **kwargs):
-    allowed = {"label", "ref_points", "notes"}
+    allowed = {"label", "material", "ref_points", "notes"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return
@@ -345,6 +353,11 @@ def update_wafer(wafer_id: int, **kwargs):
     with get_conn() as conn:
         conn.execute(f"UPDATE wafers SET {sets} WHERE wafer_id=?",
                      (*fields.values(), wafer_id))
+        if "material" in fields:
+            conn.execute(
+                "UPDATE flakes SET material=? WHERE wafer_id=?",
+                (fields["material"], wafer_id),
+            )
 
 
 def delete_wafer(wafer_id: int):
@@ -654,6 +667,25 @@ def get_wafer_flake_counts(box_id: int) -> dict:
                GROUP BY w.row, w.col""",
             (box_id,)).fetchall()
         return {(r["row"], r["col"]): r["cnt"] for r in rows}
+
+
+def get_wafer_grid_summary(box_id: int) -> dict:
+    """Return {(row,col): {count, material}} for all wafers in a box."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT w.row, w.col, w.material, COUNT(f.flake_uid) as cnt
+               FROM wafers w
+               LEFT JOIN flakes f ON w.wafer_id = f.wafer_id AND f.status='available'
+               WHERE w.box_id=?
+               GROUP BY w.wafer_id, w.row, w.col, w.material""",
+            (box_id,)).fetchall()
+        return {
+            (r["row"], r["col"]): {
+                "count": r["cnt"],
+                "material": r.get("material") or "",
+            }
+            for r in rows
+        }
 
 
 def get_project_device_summary(project_id: str) -> list[dict]:

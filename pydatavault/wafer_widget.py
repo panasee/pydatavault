@@ -37,18 +37,19 @@ class WaferGridView(QWidget):
     CELL_INSET = round(3 * SCALE)
     LABEL_FONT_SIZE = round(9 * SCALE)
     COUNT_FONT_SIZE = round(11 * SCALE)
+    MATERIAL_FONT_SIZE = round(8 * SCALE)
     CELL_RADIUS = round(7 * SCALE)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.rows = 0
         self.cols = 0
-        self.flake_counts = {}  # {(row, col): count}
+        self.flake_counts = {}  # {(row, col): count or {"count": int, "material": str}}
         self.selected_cell = None
         self.setMinimumSize(round(300 * self.SCALE), round(300 * self.SCALE))
 
     def set_grid(self, rows: int, cols: int, flake_counts: Dict):
-        """Update grid dimensions and flake counts."""
+        """Update grid dimensions and wafer cell display data."""
         self.rows = rows
         self.cols = cols
         self.flake_counts = flake_counts
@@ -124,6 +125,7 @@ class WaferGridView(QWidget):
         # Draw grid cells
         count_font = QFont("Segoe UI", self.COUNT_FONT_SIZE)
         count_font.setBold(True)
+        material_font = QFont("Segoe UI", self.MATERIAL_FONT_SIZE)
         for row in range(self.rows):
             for col in range(self.cols):
                 x = left + label_width + col * cell_size
@@ -137,7 +139,7 @@ class WaferGridView(QWidget):
                 )
 
                 # Determine cell color
-                count = self.flake_counts.get((row, col), 0)
+                count, material = self._cell_display_info(row, col)
                 if count == 0:
                     fill = QColor("#eef2f7")
                     text_color = QColor("#64748b")
@@ -160,11 +162,50 @@ class WaferGridView(QWidget):
                 painter.setBrush(Qt.NoBrush)
                 painter.drawRoundedRect(rect, self.CELL_RADIUS, self.CELL_RADIUS)
 
-                # Draw count
-                if count > 0:
+                # Draw count and wafer material.
+                if count > 0 and material:
+                    painter.setFont(count_font)
+                    painter.setPen(QPen(text_color))
+                    count_rect = QRectF(
+                        rect.left(),
+                        rect.top() + 4 * self.SCALE,
+                        rect.width(),
+                        rect.height() * 0.44,
+                    )
+                    painter.drawText(count_rect, Qt.AlignCenter, str(count))
+
+                    painter.setFont(material_font)
+                    material_rect = QRectF(
+                        rect.left() + 4 * self.SCALE,
+                        rect.top() + rect.height() * 0.50,
+                        rect.width() - 8 * self.SCALE,
+                        rect.height() * 0.40,
+                    )
+                    material_text = painter.fontMetrics().elidedText(
+                        material, Qt.ElideRight, int(material_rect.width())
+                    )
+                    painter.drawText(material_rect, Qt.AlignCenter, material_text)
+                elif count > 0:
                     painter.setFont(count_font)
                     painter.setPen(QPen(text_color))
                     painter.drawText(rect, Qt.AlignCenter, str(count))
+                elif material:
+                    painter.setFont(material_font)
+                    painter.setPen(QPen(text_color))
+                    material_rect = rect.adjusted(
+                        4 * self.SCALE, 0, -4 * self.SCALE, 0
+                    )
+                    material_text = painter.fontMetrics().elidedText(
+                        material, Qt.ElideRight, int(material_rect.width())
+                    )
+                    painter.drawText(material_rect, Qt.AlignCenter, material_text)
+
+    def _cell_display_info(self, row: int, col: int) -> tuple[int, str]:
+        """Return count/material for a grid cell, accepting old count-only data."""
+        value = self.flake_counts.get((row, col), 0)
+        if isinstance(value, dict):
+            return int(value.get("count") or 0), str(value.get("material") or "")
+        return int(value or 0), ""
 
     def _get_cell_size(self) -> int:
         """Calculate cell size based on available space."""
@@ -211,11 +252,6 @@ class AddFlakeDialog(QDialog):
         layout.addWidget(QLabel("Flake ID:"))
         self.flake_id_input = QLineEdit()
         layout.addWidget(self.flake_id_input)
-
-        # Material
-        layout.addWidget(QLabel("Material:"))
-        self.material_input = QLineEdit()
-        layout.addWidget(self.material_input)
 
         # Thickness
         layout.addWidget(QLabel("Thickness:"))
@@ -286,7 +322,6 @@ class AddFlakeDialog(QDialog):
         """Return entered flake data."""
         return {
             'flake_id': self.flake_id_input.text().strip(),
-            'material': self.material_input.text().strip(),
             'thickness': self.thickness_input.text().strip(),
             'magnification': self.magnification_input.text().strip(),
             'coord_x': self.coord_x.value(),
@@ -1207,8 +1242,8 @@ class WaferWidget(QWidget):
             if not box:
                 return
 
-            flake_counts = db.get_wafer_flake_counts(self.current_box_id)
-            self.grid_view.set_grid(box['rows'], box['cols'], flake_counts)
+            grid_summary = db.get_wafer_grid_summary(self.current_box_id)
+            self.grid_view.set_grid(box['rows'], box['cols'], grid_summary)
         except Exception as e:
             QMessageBox.critical(self, "Database Error", f"Failed to load grid: {str(e)}")
 
@@ -1249,6 +1284,10 @@ class WaferWidget(QWidget):
         label_edit.setPlaceholderText("e.g., graphene-rich, hBN target")
         form.addRow("Wafer Label:", label_edit)
 
+        material_edit = QLineEdit(wafer.get("material", "") or "")
+        material_edit.setPlaceholderText("e.g., Graphene, hBN, WTe2")
+        form.addRow("Material:", material_edit)
+
         notes_edit = QTextEdit()
         notes_edit.setPlainText(wafer.get("notes", "") or "")
         notes_edit.setFixedHeight(90)
@@ -1262,22 +1301,28 @@ class WaferWidget(QWidget):
         layout.addWidget(buttons)
 
         if dialog.exec() == QDialog.Accepted:
-            self._save_wafer_metadata(label_edit.text(), notes_edit.toPlainText())
+            self._save_wafer_metadata(
+                label_edit.text(),
+                material_edit.text(),
+                notes_edit.toPlainText(),
+            )
 
-    def _save_wafer_metadata(self, label: str, notes: str):
-        """Persist wafer label/notes and refresh the selected wafer panel."""
+    def _save_wafer_metadata(self, label: str, material: str, notes: str):
+        """Persist wafer metadata and refresh the selected wafer panel."""
         if not self.current_wafer_id:
             return
 
         db.update_wafer(
             self.current_wafer_id,
             label=label.strip(),
+            material=material.strip(),
             notes=notes.strip(),
         )
         wafer = db.get_wafer_by_id(self.current_wafer_id)
         if wafer is not None:
             self.load_flakes_for_wafer(wafer)
             self.load_ref_points(wafer)
+            self.load_grid()
 
     def load_flakes_for_wafer(self, wafer: dict):
         """Load flakes for the selected wafer."""
@@ -1295,7 +1340,9 @@ class WaferWidget(QWidget):
                 self.flake_table.setRowCount(len(flakes))
                 for i, flake in enumerate(flakes):
                     self.flake_table.setItem(i, 0, QTableWidgetItem(flake['flake_id']))
-                    self.flake_table.setItem(i, 1, QTableWidgetItem(flake.get('material', '')))
+                    material_item = QTableWidgetItem(flake.get('material', ''))
+                    material_item.setFlags(material_item.flags() & ~Qt.ItemIsEditable)
+                    self.flake_table.setItem(i, 1, material_item)
                     self.flake_table.setItem(i, 2, QTableWidgetItem(flake.get('thickness', '')))
                     self.flake_table.setItem(i, 3, QTableWidgetItem(flake.get('magnification', '')))
                     status_item = QTableWidgetItem(flake.get('status', ''))
@@ -1343,7 +1390,6 @@ class WaferWidget(QWidget):
                 return
 
             update_data = {
-                'material': row_items[1].text(),
                 'thickness': row_items[2].text(),
                 'magnification': row_items[3].text(),
                 'status': row_items[4].text(),
@@ -1516,10 +1562,13 @@ class WaferWidget(QWidget):
                 QMessageBox.warning(self, "Error", "Flake ID is required")
                 return
 
+            wafer = db.get_wafer_by_id(self.current_wafer_id)
+            material = wafer.get('material', '') if wafer is not None else ''
+
             flake_uid = db.create_flake(
                 flake_id=data['flake_id'],
                 wafer_id=self.current_wafer_id,
-                material=data['material'],
+                material=material,
                 thickness=data['thickness'],
                 magnification=data['magnification'],
                 coord_x=data['coord_x'],

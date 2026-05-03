@@ -153,17 +153,138 @@ class PyDataVaultRegressionTests(unittest.TestCase):
             def load_ref_points(self, wafer_dict):
                 refreshed.append(("refs", wafer_dict))
 
+            def load_grid(self):
+                refreshed.append(("grid",))
+
         self.wafer_widget.WaferWidget._save_wafer_metadata(
             DummyWidget(),
             "graphene-rich",
+            "Graphene",
             "good contrast near center",
         )
 
         updated = self.db.get_wafer_by_id(wafer["wafer_id"])
         self.assertEqual(updated["label"], "graphene-rich")
+        self.assertEqual(updated["material"], "Graphene")
         self.assertEqual(updated["notes"], "good contrast near center")
         self.assertEqual(refreshed[0], ("flakes", updated))
         self.assertEqual(refreshed[1], ("refs", updated))
+        self.assertEqual(refreshed[2], ("grid",))
+
+    def test_wafer_material_updates_attached_flakes(self):
+        box_id = self.db.create_box("Box Material")
+        wafer = self.db.get_or_create_wafer(box_id, 0, 0)
+        attached_uid = self.db.create_flake("bf1", wafer["wafer_id"], material="")
+        used_uid = self.db.create_flake("bf2", wafer["wafer_id"], material="Graphene")
+        self.db.create_project("proj-material", "Project Material")
+        self.db.create_device_with_layers(
+            "device-material",
+            "proj-material",
+            [{"layer_name": "channel", "flake_uid": used_uid}],
+        )
+
+        self.db.update_wafer(wafer["wafer_id"], material="hBN")
+
+        updated_wafer = self.db.get_wafer_by_id(wafer["wafer_id"])
+        self.assertEqual(updated_wafer["material"], "hBN")
+        self.assertEqual(self.db.get_flake(attached_uid)["material"], "hBN")
+        self.assertEqual(self.db.get_flake(used_uid)["material"], "Graphene")
+
+    def test_wafer_grid_summary_includes_material(self):
+        box_id = self.db.create_box("Box Grid Material")
+        wafer = self.db.get_or_create_wafer(box_id, 0, 0)
+        self.db.update_wafer(wafer["wafer_id"], material="Graphene")
+        self.db.create_flake("bf1", wafer["wafer_id"], material="Graphene")
+
+        summary = self.db.get_wafer_grid_summary(box_id)
+
+        self.assertEqual(summary[(0, 0)]["count"], 1)
+        self.assertEqual(summary[(0, 0)]["material"], "Graphene")
+
+    def test_wafer_grid_summary_keeps_material_without_flakes(self):
+        box_id = self.db.create_box("Box Grid Material Only")
+        wafer = self.db.get_or_create_wafer(box_id, 0, 0)
+        self.db.update_wafer(wafer["wafer_id"], material="Graphene")
+
+        summary = self.db.get_wafer_grid_summary(box_id)
+
+        self.assertEqual(summary[(0, 0)]["count"], 0)
+        self.assertEqual(summary[(0, 0)]["material"], "Graphene")
+
+    def test_wafer_grid_display_info_keeps_material_without_flakes(self):
+        grid = self.wafer_widget.WaferGridView()
+        try:
+            grid.set_grid(
+                1,
+                2,
+                {
+                    (0, 0): {"count": 2, "material": "Graphene"},
+                    (0, 1): {"count": 0, "material": "hBN"},
+                },
+            )
+
+            self.assertEqual(grid._cell_display_info(0, 0), (2, "Graphene"))
+            self.assertEqual(grid._cell_display_info(0, 1), (0, "hBN"))
+        finally:
+            grid.close()
+
+    def test_wafer_grid_display_info_omits_blank_material(self):
+        grid = self.wafer_widget.WaferGridView()
+        try:
+            grid.set_grid(1, 1, {(0, 0): {"count": 0, "material": ""}})
+
+            self.assertEqual(grid._cell_display_info(0, 0), (0, ""))
+        finally:
+            grid.close()
+
+    def test_add_flake_inherits_current_wafer_material(self):
+        box_id = self.db.create_box("Box Add Material")
+        wafer = self.db.get_or_create_wafer(box_id, 0, 0)
+        self.db.update_wafer(wafer["wafer_id"], material="Graphene")
+
+        class DummyDialog:
+            def __init__(self, wafer_id, parent=None):
+                self.wafer_id = wafer_id
+
+            def exec(self):
+                return self.wafer_widget.QDialog.Accepted
+
+            def get_data(self):
+                return {
+                    "flake_id": "bf1",
+                    "thickness": "",
+                    "magnification": "",
+                    "photo_path": None,
+                    "coord_x": 0.0,
+                    "coord_y": 0.0,
+                    "notes": "",
+                }
+
+        class DummyWidget:
+            current_box_id = box_id
+            current_wafer_id = wafer["wafer_id"]
+            grid_view = mock.Mock(selected_cell=None)
+
+            def load_flakes_for_wafer(self, wafer_dict):
+                pass
+
+            def load_grid(self):
+                pass
+
+        DummyDialog.wafer_widget = self.wafer_widget
+        with mock.patch.object(self.wafer_widget, "AddFlakeDialog", DummyDialog):
+            self.wafer_widget.WaferWidget.add_flake(DummyWidget())
+
+        flakes = self.db.get_flakes_for_wafer(wafer["wafer_id"])
+        self.assertEqual(flakes[0]["material"], "Graphene")
+
+    def test_add_flake_dialog_has_no_material_input(self):
+        dialog = self.wafer_widget.AddFlakeDialog(1)
+        try:
+            self.assertFalse(hasattr(dialog, "material_input"))
+            self.assertNotIn("material", dialog.get_data())
+        finally:
+            dialog.close()
 
     def test_loading_flakes_does_not_trigger_partial_row_update(self):
         box_id = self.db.create_box("Box Load Flakes")
@@ -190,6 +311,40 @@ class PyDataVaultRegressionTests(unittest.TestCase):
                 widget.on_flake_cell_changed(widget.flake_table.item(0, 0))
 
             update_flake.assert_not_called()
+        finally:
+            widget.close()
+
+    def test_flake_material_column_is_display_only(self):
+        box_id = self.db.create_box("Box Display Material")
+        wafer = self.db.get_or_create_wafer(box_id, 0, 0)
+        self.db.update_wafer(wafer["wafer_id"], material="Graphene")
+        self.db.create_flake("bf1", wafer["wafer_id"], material="Graphene")
+        wafer = self.db.get_wafer_by_id(wafer["wafer_id"])
+
+        widget = self.wafer_widget.WaferWidget()
+        try:
+            widget.load_flakes_for_wafer(wafer)
+            material_item = widget.flake_table.item(0, 1)
+            self.assertFalse(material_item.flags() & self.wafer_widget.Qt.ItemIsEditable)
+        finally:
+            widget.close()
+
+    def test_flake_table_update_does_not_overwrite_material(self):
+        box_id = self.db.create_box("Box Preserve Material")
+        wafer = self.db.get_or_create_wafer(box_id, 0, 0)
+        flake_uid = self.db.create_flake("bf1", wafer["wafer_id"], material="Graphene")
+
+        widget = self.wafer_widget.WaferWidget()
+        try:
+            widget.current_wafer_id = wafer["wafer_id"]
+            widget.load_flakes_for_wafer(wafer)
+            widget.flake_table.item(0, 1).setText("hBN")
+            widget.flake_table.item(0, 2).setText("12 nm")
+            widget.on_flake_cell_changed(widget.flake_table.item(0, 2))
+
+            flake = self.db.get_flake(flake_uid)
+            self.assertEqual(flake["material"], "Graphene")
+            self.assertEqual(flake["thickness"], "12 nm")
         finally:
             widget.close()
 
