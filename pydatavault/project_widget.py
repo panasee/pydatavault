@@ -552,7 +552,7 @@ class NewDeviceDialog(QDialog):
         for row, layer in enumerate(self.layers):
             self.layers_table.setItem(row, 0, QTableWidgetItem(str(row)))
             self.layers_table.setItem(row, 1, QTableWidgetItem(layer['layer_name']))
-            self.layers_table.setItem(row, 2, QTableWidgetItem(layer['flake_id']))
+            self.layers_table.setItem(row, 2, QTableWidgetItem(layer.get('flake_id') or ''))
             self.layers_table.setItem(row, 3, QTableWidgetItem(layer.get('material', '')))
 
     def accept(self):
@@ -674,6 +674,7 @@ class EditDeviceDialog(QDialog):
             {
                 'id': layer['id'],
                 'layer_name': layer['layer_name'],
+                'flake_uid': layer['flake_uid'],
                 'flake_id': layer['flake_id'],
                 'material': layer.get('material', '')
             }
@@ -687,7 +688,7 @@ class EditDeviceDialog(QDialog):
         for row, layer in enumerate(self.layers):
             self.layers_table.setItem(row, 0, QTableWidgetItem(str(row)))
             self.layers_table.setItem(row, 1, QTableWidgetItem(layer['layer_name']))
-            self.layers_table.setItem(row, 2, QTableWidgetItem(layer['flake_id']))
+            self.layers_table.setItem(row, 2, QTableWidgetItem(layer.get('flake_id') or ''))
             self.layers_table.setItem(row, 3, QTableWidgetItem(layer.get('material', '')))
 
     def on_add_layer(self):
@@ -771,17 +772,24 @@ class AddLayerDialog(QDialog):
 
         flakes = db.get_available_flakes(material_filter=material)
         for flake in flakes:
+            wafer_label = ""
+            if flake.get("box_name") is not None and flake.get("wafer_row") is not None:
+                row_label = chr(ord("A") + flake["wafer_row"])
+                col_label = flake["wafer_col"] + 1
+                wafer_label = f" [{flake['box_name']} {row_label}{col_label}]"
             self.flake_combo.addItem(
-                f"{flake['flake_id']} ({flake.get('material', 'Unknown')})",
-                flake['flake_id']
+                f"{flake['flake_id']}{wafer_label} ({flake.get('material', 'Unknown')})",
+                flake
             )
 
     def get_layer_data(self):
         """Return the layer data."""
+        flake = self.flake_combo.currentData()
         return {
             'layer_name': self.layer_name_edit.text(),
-            'flake_id': self.flake_combo.currentData(),
-            'material': self.material_combo.currentText()
+            'flake_uid': flake['flake_uid'],
+            'flake_id': flake['flake_id'],
+            'material': flake.get('material', '')
         }
 
     def accept(self):

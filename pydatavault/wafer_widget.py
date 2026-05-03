@@ -1,4 +1,5 @@
 import json
+import logging
 import math
 import shutil
 from pathlib import Path
@@ -8,7 +9,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QListWidget, QListWidgetItem,
     QPushButton, QTableWidget, QTableWidgetItem, QDialog, QLabel, QLineEdit,
     QSpinBox, QDoubleSpinBox, QTextEdit, QMessageBox, QFileDialog,
-    QHeaderView, QComboBox, QSizePolicy
+    QHeaderView, QComboBox, QSizePolicy, QFormLayout, QDialogButtonBox
 )
 from PySide6.QtCore import Qt, Signal, QSize, QRect, QPoint, QPointF, QRectF
 from PySide6.QtGui import (
@@ -21,10 +22,22 @@ from . import coord_utils
 from . import style
 
 
+logger = logging.getLogger("PyOmnix")
+
+
 class WaferGridView(QWidget):
     """Custom widget for rendering and interacting with the wafer grid."""
 
     cell_clicked = Signal(int, int)  # row, col
+    SCALE = 1.10
+    LABEL_WIDTH = round(40 * SCALE)
+    LABEL_HEIGHT = round(30 * SCALE)
+    MIN_CELL_SIZE = round(30 * SCALE)
+    EMPTY_CELL_SIZE = round(50 * SCALE)
+    CELL_INSET = round(3 * SCALE)
+    LABEL_FONT_SIZE = round(9 * SCALE)
+    COUNT_FONT_SIZE = round(11 * SCALE)
+    CELL_RADIUS = round(7 * SCALE)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -32,7 +45,7 @@ class WaferGridView(QWidget):
         self.cols = 0
         self.flake_counts = {}  # {(row, col): count}
         self.selected_cell = None
-        self.setMinimumSize(300, 300)
+        self.setMinimumSize(round(300 * self.SCALE), round(300 * self.SCALE))
 
     def set_grid(self, rows: int, cols: int, flake_counts: Dict):
         """Update grid dimensions and flake counts."""
@@ -52,12 +65,12 @@ class WaferGridView(QWidget):
         if self.rows == 0 or self.cols == 0:
             return
 
-        cell_size = self._get_cell_size()
-        label_width = 40
-        label_height = 30
+        left, top, cell_size = self._grid_geometry()
+        label_width = self.LABEL_WIDTH
+        label_height = self.LABEL_HEIGHT
 
-        x = event.pos().x() - label_width
-        y = event.pos().y() - label_height
+        x = event.pos().x() - left - label_width
+        y = event.pos().y() - top - label_height
 
         if x < 0 or y < 0:
             return
@@ -80,42 +93,48 @@ class WaferGridView(QWidget):
             painter.drawText(self.rect(), Qt.AlignCenter, "No box selected")
             return
 
-        cell_size = self._get_cell_size()
-        label_width = 40
-        label_height = 30
+        left, top, cell_size = self._grid_geometry()
+        label_width = self.LABEL_WIDTH
+        label_height = self.LABEL_HEIGHT
 
-        label_font = QFont("Segoe UI", 9)
+        label_font = QFont("Segoe UI", self.LABEL_FONT_SIZE)
         label_font.setBold(True)
         painter.setFont(label_font)
         painter.setPen(QPen(QColor("#64748b")))
 
         # Draw column labels (1, 2, 3, ...)
         for col in range(self.cols):
-            x = label_width + col * cell_size
+            x = left + label_width + col * cell_size
             painter.drawText(
-                QRect(x, 0, cell_size, label_height),
+                QRect(x, top, cell_size, label_height),
                 Qt.AlignCenter,
                 str(col + 1)
             )
 
         # Draw row labels (A, B, C, ...)
         for row in range(self.rows):
-            y = label_height + row * cell_size
+            y = top + label_height + row * cell_size
             label = chr(ord('A') + row)
             painter.drawText(
-                QRect(0, y, label_width, cell_size),
+                QRect(left, y, label_width, cell_size),
                 Qt.AlignCenter,
                 label
             )
 
         # Draw grid cells
-        count_font = QFont("Segoe UI", 11)
+        count_font = QFont("Segoe UI", self.COUNT_FONT_SIZE)
         count_font.setBold(True)
         for row in range(self.rows):
             for col in range(self.cols):
-                x = label_width + col * cell_size
-                y = label_height + row * cell_size
-                rect = QRectF(x + 3, y + 3, cell_size - 6, cell_size - 6)
+                x = left + label_width + col * cell_size
+                y = top + label_height + row * cell_size
+                inset = self.CELL_INSET
+                rect = QRectF(
+                    x + inset,
+                    y + inset,
+                    cell_size - inset * 2,
+                    cell_size - inset * 2,
+                )
 
                 # Determine cell color
                 count = self.flake_counts.get((row, col), 0)
@@ -131,15 +150,15 @@ class WaferGridView(QWidget):
 
                 painter.setPen(Qt.NoPen)
                 painter.setBrush(QBrush(fill))
-                painter.drawRoundedRect(rect, 7, 7)
+                painter.drawRoundedRect(rect, self.CELL_RADIUS, self.CELL_RADIUS)
 
                 # Draw border
                 is_selected = self.selected_cell == (row, col)
                 pen_color = QColor("#2563eb") if is_selected else QColor("#cbd5e1")
-                pen_width = 2.5 if is_selected else 1
+                pen_width = 2.5 * self.SCALE if is_selected else 1
                 painter.setPen(QPen(pen_color, pen_width))
                 painter.setBrush(Qt.NoBrush)
-                painter.drawRoundedRect(rect, 7, 7)
+                painter.drawRoundedRect(rect, self.CELL_RADIUS, self.CELL_RADIUS)
 
                 # Draw count
                 if count > 0:
@@ -149,17 +168,26 @@ class WaferGridView(QWidget):
 
     def _get_cell_size(self) -> int:
         """Calculate cell size based on available space."""
-        label_width = 40
-        label_height = 30
+        label_width = self.LABEL_WIDTH
+        label_height = self.LABEL_HEIGHT
         available_width = self.width() - label_width
         available_height = self.height() - label_height
 
         if self.rows == 0 or self.cols == 0:
-            return 50
+            return self.EMPTY_CELL_SIZE
 
-        cell_w = max(30, available_width // self.cols)
-        cell_h = max(30, available_height // self.rows)
+        cell_w = max(self.MIN_CELL_SIZE, available_width // self.cols)
+        cell_h = max(self.MIN_CELL_SIZE, available_height // self.rows)
         return min(cell_w, cell_h)
+
+    def _grid_geometry(self) -> tuple[int, int, int]:
+        """Return the centered grid origin and cell size."""
+        cell_size = self._get_cell_size()
+        grid_width = self.LABEL_WIDTH + self.cols * cell_size
+        grid_height = self.LABEL_HEIGHT + self.rows * cell_size
+        left = max(0, (self.width() - grid_width) // 2)
+        top = max(0, (self.height() - grid_height) // 2)
+        return left, top, cell_size
 
     def resizeEvent(self, event):
         """Redraw on resize."""
@@ -1037,10 +1065,11 @@ class WaferWidget(QWidget):
         center_layout.setSpacing(10)
         grid_title = QLabel("Wafer Grid")
         style.decorate_heading(grid_title)
-        center_layout.addWidget(grid_title)
+        grid_title.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        center_layout.addWidget(grid_title, 0, Qt.AlignTop)
         self.grid_view = WaferGridView()
         self.grid_view.cell_clicked.connect(self.on_cell_clicked)
-        center_layout.addWidget(self.grid_view)
+        center_layout.addWidget(self.grid_view, 1)
         center_widget = QWidget()
         style.decorate_panel(center_widget, "gridPanel")
         center_widget.setLayout(center_layout)
@@ -1049,9 +1078,17 @@ class WaferWidget(QWidget):
         right_layout = QVBoxLayout()
         right_layout.setContentsMargins(14, 14, 14, 14)
         right_layout.setSpacing(10)
+        wafer_header_row = QHBoxLayout()
+        wafer_header_row.setSpacing(8)
         self.wafer_header = QLabel("No wafer selected")
         style.decorate_heading(self.wafer_header)
-        right_layout.addWidget(self.wafer_header)
+        wafer_header_row.addWidget(self.wafer_header, 1)
+        edit_wafer_btn = QPushButton("Edit Wafer")
+        style.decorate_button(edit_wafer_btn, "utility", "edit")
+        edit_wafer_btn.setFixedWidth(92)
+        edit_wafer_btn.clicked.connect(self.edit_wafer_metadata)
+        wafer_header_row.addWidget(edit_wafer_btn)
+        right_layout.addLayout(wafer_header_row)
 
         # Reference points section
         ref_header = QHBoxLayout()
@@ -1188,6 +1225,60 @@ class WaferWidget(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Database Error", f"Failed to load wafer: {str(e)}")
 
+    def edit_wafer_metadata(self):
+        """Open a dialog for editing the selected wafer's label and notes."""
+        if not self.current_wafer_id:
+            QMessageBox.warning(self, "Error", "Please select a wafer first")
+            return
+
+        wafer = db.get_wafer_by_id(self.current_wafer_id)
+        if wafer is None:
+            QMessageBox.warning(self, "Error", "Selected wafer no longer exists")
+            return
+
+        row_label = chr(ord('A') + wafer['row'])
+        col_label = wafer['col'] + 1
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Edit Wafer {row_label}{col_label}")
+        dialog.setMinimumWidth(360)
+
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+
+        label_edit = QLineEdit(wafer.get("label", "") or "")
+        label_edit.setPlaceholderText("e.g., graphene-rich, hBN target")
+        form.addRow("Wafer Label:", label_edit)
+
+        notes_edit = QTextEdit()
+        notes_edit.setPlainText(wafer.get("notes", "") or "")
+        notes_edit.setFixedHeight(90)
+        form.addRow("Notes:", notes_edit)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() == QDialog.Accepted:
+            self._save_wafer_metadata(label_edit.text(), notes_edit.toPlainText())
+
+    def _save_wafer_metadata(self, label: str, notes: str):
+        """Persist wafer label/notes and refresh the selected wafer panel."""
+        if not self.current_wafer_id:
+            return
+
+        db.update_wafer(
+            self.current_wafer_id,
+            label=label.strip(),
+            notes=notes.strip(),
+        )
+        wafer = db.get_wafer_by_id(self.current_wafer_id)
+        if wafer is not None:
+            self.load_flakes_for_wafer(wafer)
+            self.load_ref_points(wafer)
+
     def load_flakes_for_wafer(self, wafer: dict):
         """Load flakes for the selected wafer."""
         try:
@@ -1199,21 +1290,26 @@ class WaferWidget(QWidget):
                 f"Wafer {row_label}{col_label} - {label}"
             )
 
-            self.flake_table.setRowCount(len(flakes))
-            for i, flake in enumerate(flakes):
-                self.flake_table.setItem(i, 0, QTableWidgetItem(flake['flake_id']))
-                self.flake_table.setItem(i, 1, QTableWidgetItem(flake.get('material', '')))
-                self.flake_table.setItem(i, 2, QTableWidgetItem(flake.get('thickness', '')))
-                self.flake_table.setItem(i, 3, QTableWidgetItem(flake.get('magnification', '')))
-                status_item = QTableWidgetItem(flake.get('status', ''))
-                style.decorate_status_item(status_item, flake.get('status', ''))
-                self.flake_table.setItem(i, 4, status_item)
-                self.flake_table.setItem(i, 5, QTableWidgetItem(flake.get('notes', '')))
+            signals_blocked = self.flake_table.blockSignals(True)
+            try:
+                self.flake_table.setRowCount(len(flakes))
+                for i, flake in enumerate(flakes):
+                    self.flake_table.setItem(i, 0, QTableWidgetItem(flake['flake_id']))
+                    self.flake_table.setItem(i, 1, QTableWidgetItem(flake.get('material', '')))
+                    self.flake_table.setItem(i, 2, QTableWidgetItem(flake.get('thickness', '')))
+                    self.flake_table.setItem(i, 3, QTableWidgetItem(flake.get('magnification', '')))
+                    status_item = QTableWidgetItem(flake.get('status', ''))
+                    style.decorate_status_item(status_item, flake.get('status', ''))
+                    self.flake_table.setItem(i, 4, status_item)
+                    self.flake_table.setItem(i, 5, QTableWidgetItem(flake.get('notes', '')))
 
-                # Store flake_id in row
-                for col in range(6):
-                    self.flake_table.item(i, col).setData(Qt.UserRole, flake['flake_id'])
+                    # Store internal flake_uid in each row item.
+                    for col in range(6):
+                        self.flake_table.item(i, col).setData(Qt.UserRole, flake['flake_uid'])
+            finally:
+                self.flake_table.blockSignals(signals_blocked)
         except Exception as e:
+            logger.exception("Failed to load flakes")
             QMessageBox.critical(self, "Database Error", f"Failed to load flakes: {str(e)}")
 
     def load_ref_points(self, wafer: dict):
@@ -1238,18 +1334,25 @@ class WaferWidget(QWidget):
 
         try:
             row = item.row()
-            flake_id = self.flake_table.item(row, 0).data(Qt.UserRole)
+            row_items = [self.flake_table.item(row, col) for col in range(6)]
+            if any(row_item is None for row_item in row_items):
+                return
+
+            flake_uid = row_items[0].data(Qt.UserRole)
+            if flake_uid is None:
+                return
 
             update_data = {
-                'material': self.flake_table.item(row, 1).text(),
-                'thickness': self.flake_table.item(row, 2).text(),
-                'magnification': self.flake_table.item(row, 3).text(),
-                'status': self.flake_table.item(row, 4).text(),
-                'notes': self.flake_table.item(row, 5).text(),
+                'material': row_items[1].text(),
+                'thickness': row_items[2].text(),
+                'magnification': row_items[3].text(),
+                'status': row_items[4].text(),
+                'notes': row_items[5].text(),
             }
 
-            db.update_flake(flake_id, **update_data)
+            db.update_flake(flake_uid, **update_data)
         except Exception as e:
+            logger.exception("Failed to update flake")
             QMessageBox.critical(self, "Database Error", f"Failed to update flake: {str(e)}")
 
     def add_box(self):
@@ -1413,34 +1516,34 @@ class WaferWidget(QWidget):
                 QMessageBox.warning(self, "Error", "Flake ID is required")
                 return
 
-            photo_path = None
-            if data['photo_path']:
-                flake_dir = config.FLAKES_DIR / data['flake_id']
-                flake_dir.mkdir(parents=True, exist_ok=True)
-                dest = flake_dir / Path(data['photo_path']).name
-                shutil.copy(data['photo_path'], dest)
-                photo_path = str(dest)
-
-            db.create_flake(
+            flake_uid = db.create_flake(
                 flake_id=data['flake_id'],
                 wafer_id=self.current_wafer_id,
                 material=data['material'],
                 thickness=data['thickness'],
                 magnification=data['magnification'],
-                photo_path=photo_path or '',
                 coord_x=data['coord_x'],
                 coord_y=data['coord_y'],
                 notes=data['notes']
             )
 
-            wafer = db.get_or_create_wafer(
-                self.current_box_id,
-                self.grid_view.selected_cell[0],
-                self.grid_view.selected_cell[1]
-            )
-            self.load_flakes_for_wafer(wafer)
+            if data['photo_path']:
+                try:
+                    flake_dir = config.FLAKES_DIR / str(flake_uid)
+                    flake_dir.mkdir(parents=True, exist_ok=True)
+                    dest = flake_dir / Path(data['photo_path']).name
+                    shutil.copy(data['photo_path'], dest)
+                    db.update_flake(flake_uid, photo_path=str(dest))
+                except Exception:
+                    db.delete_flake(flake_uid)
+                    raise
+
+            wafer = db.get_wafer_by_id(self.current_wafer_id)
+            if wafer is not None:
+                self.load_flakes_for_wafer(wafer)
             self.load_grid()
         except Exception as e:
+            logger.exception("Failed to add flake")
             QMessageBox.critical(self, "Database Error", f"Failed to add flake: {str(e)}")
 
     def delete_flake(self):
@@ -1450,7 +1553,8 @@ class WaferWidget(QWidget):
             QMessageBox.warning(self, "Error", "Please select a flake to delete")
             return
 
-        flake_id = self.flake_table.item(current_row, 0).data(Qt.UserRole)
+        flake_uid = self.flake_table.item(current_row, 0).data(Qt.UserRole)
+        flake_id = self.flake_table.item(current_row, 0).text()
 
         reply = QMessageBox.question(
             self, "Confirm Delete",
@@ -1460,15 +1564,13 @@ class WaferWidget(QWidget):
 
         if reply == QMessageBox.Yes:
             try:
-                db.delete_flake(flake_id)
-                wafer = db.get_or_create_wafer(
-                    self.current_box_id,
-                    self.grid_view.selected_cell[0],
-                    self.grid_view.selected_cell[1]
-                )
-                self.load_flakes_for_wafer(wafer)
+                db.delete_flake(flake_uid)
+                wafer = db.get_wafer_by_id(self.current_wafer_id)
+                if wafer is not None:
+                    self.load_flakes_for_wafer(wafer)
                 self.load_grid()
             except Exception as e:
+                logger.exception("Failed to delete flake")
                 QMessageBox.critical(self, "Database Error", f"Failed to delete flake: {str(e)}")
 
     def view_photo(self):
@@ -1478,11 +1580,11 @@ class WaferWidget(QWidget):
             QMessageBox.warning(self, "Error", "Please select a flake to view")
             return
 
-        flake_id = self.flake_table.item(current_row, 0).data(Qt.UserRole)
+        flake_uid = self.flake_table.item(current_row, 0).data(Qt.UserRole)
 
         try:
             flakes = db.get_flakes_for_wafer(self.current_wafer_id)
-            flake = next((f for f in flakes if f['flake_id'] == flake_id), None)
+            flake = next((f for f in flakes if f['flake_uid'] == flake_uid), None)
 
             if not flake or not flake.get('photo_path'):
                 QMessageBox.warning(self, "Error", "No photo available for this flake")

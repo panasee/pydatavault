@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS wafers (
 );
 
 CREATE TABLE IF NOT EXISTS flakes (
-    flake_id    TEXT PRIMARY KEY,
+    flake_uid   INTEGER PRIMARY KEY AUTOINCREMENT,
+    flake_id    TEXT NOT NULL,
     wafer_id    INTEGER REFERENCES wafers(wafer_id) ON DELETE SET NULL,
     material    TEXT NOT NULL DEFAULT '',
     thickness   TEXT DEFAULT '',
@@ -65,7 +66,8 @@ CREATE TABLE IF NOT EXISTS flakes (
     status      TEXT NOT NULL DEFAULT 'available' CHECK(status IN ('available','used')),
     used_in_device TEXT DEFAULT NULL REFERENCES devices(device_id) ON DELETE SET NULL,
     notes       TEXT DEFAULT '',
-    created_at  TEXT DEFAULT (datetime('now','localtime'))
+    created_at  TEXT DEFAULT (datetime('now','localtime')),
+    UNIQUE(wafer_id, flake_id)
 );
 
 CREATE TABLE IF NOT EXISTS projects (
@@ -94,7 +96,7 @@ CREATE TABLE IF NOT EXISTS device_layers (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     device_id   TEXT NOT NULL REFERENCES devices(device_id) ON DELETE CASCADE,
     layer_name  TEXT NOT NULL,
-    flake_id    TEXT REFERENCES flakes(flake_id) ON DELETE SET NULL,
+    flake_uid   INTEGER REFERENCES flakes(flake_uid) ON DELETE SET NULL,
     order_index INTEGER DEFAULT 0
 );
 """
@@ -114,6 +116,30 @@ def _migrate():
     Each migration is idempotent: it checks whether the change is already
     present before attempting it.
     """
+    with get_conn() as conn:
+        flake_columns = {
+            row["name"]: row
+            for row in conn.execute("PRAGMA table_info(flakes)").fetchall()
+        }
+        layer_columns = {
+            row["name"]: row
+            for row in conn.execute("PRAGMA table_info(device_layers)").fetchall()
+        }
+        fk_rows = conn.execute("PRAGMA foreign_key_list(flakes)").fetchall()
+        wafer_fk = next(
+            (row for row in fk_rows if row.get("from") == "wafer_id"),
+            None,
+        )
+        needs_flake_uid = "flake_uid" not in flake_columns
+        needs_layer_uid = "flake_uid" not in layer_columns
+        needs_wafer_policy = wafer_fk and wafer_fk.get("on_delete") != "SET NULL"
+
+        if needs_flake_uid or needs_layer_uid or needs_wafer_policy:
+            _rebuild_flake_schema(conn, flake_columns, layer_columns)
+            return
+
+        conn.execute("UPDATE flakes SET wafer_id=NULL WHERE status='used'")
+
     # Migration: flakes.wafer_id must be ON DELETE SET NULL.
     #
     # Earlier versions shipped ON DELETE CASCADE (which wiped used-flake
@@ -161,6 +187,90 @@ def _migrate():
 
                 PRAGMA foreign_keys = ON;
             """)
+
+
+def _rebuild_flake_schema(conn, flake_columns: dict, layer_columns: dict):
+    """Rebuild flakes/device_layers around internal flake_uid references."""
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.executescript("""
+            CREATE TABLE flakes_new (
+                flake_uid     INTEGER PRIMARY KEY AUTOINCREMENT,
+                flake_id      TEXT NOT NULL,
+                wafer_id      INTEGER REFERENCES wafers(wafer_id) ON DELETE SET NULL,
+                material      TEXT NOT NULL DEFAULT '',
+                thickness     TEXT DEFAULT '',
+                magnification TEXT DEFAULT '',
+                photo_path    TEXT DEFAULT '',
+                coord_x       REAL DEFAULT 0.0,
+                coord_y       REAL DEFAULT 0.0,
+                status        TEXT NOT NULL DEFAULT 'available'
+                              CHECK(status IN ('available','used')),
+                used_in_device TEXT DEFAULT NULL
+                              REFERENCES devices(device_id) ON DELETE SET NULL,
+                notes         TEXT DEFAULT '',
+                created_at    TEXT DEFAULT (datetime('now','localtime')),
+                UNIQUE(wafer_id, flake_id)
+            );
+
+            CREATE TABLE device_layers_new (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id   TEXT NOT NULL REFERENCES devices(device_id) ON DELETE CASCADE,
+                layer_name  TEXT NOT NULL,
+                flake_uid   INTEGER REFERENCES flakes_new(flake_uid) ON DELETE SET NULL,
+                order_index INTEGER DEFAULT 0
+            );
+        """)
+
+        if "flake_uid" in flake_columns:
+            conn.execute("""
+                INSERT INTO flakes_new
+                    (flake_uid, flake_id, wafer_id, material, thickness,
+                     magnification, photo_path, coord_x, coord_y, status,
+                     used_in_device, notes, created_at)
+                SELECT flake_uid, flake_id, wafer_id, material, thickness,
+                       magnification, photo_path, coord_x, coord_y, status,
+                       used_in_device, notes, created_at
+                FROM flakes
+            """)
+        else:
+            conn.execute("""
+                INSERT INTO flakes_new
+                    (flake_id, wafer_id, material, thickness, magnification,
+                     photo_path, coord_x, coord_y, status, used_in_device,
+                     notes, created_at)
+                SELECT flake_id, wafer_id, material, thickness, magnification,
+                       photo_path, coord_x, coord_y, status, used_in_device,
+                       notes, created_at
+                FROM flakes
+            """)
+
+        if "flake_uid" in layer_columns:
+            conn.execute("""
+                INSERT INTO device_layers_new
+                    (id, device_id, layer_name, flake_uid, order_index)
+                SELECT id, device_id, layer_name, flake_uid, order_index
+                FROM device_layers
+            """)
+        else:
+            conn.execute("""
+                INSERT INTO device_layers_new
+                    (id, device_id, layer_name, flake_uid, order_index)
+                SELECT dl.id, dl.device_id, dl.layer_name, f.flake_uid,
+                       dl.order_index
+                FROM device_layers dl
+                LEFT JOIN flakes_new f ON dl.flake_id = f.flake_id
+            """)
+
+        conn.executescript("""
+            DROP TABLE device_layers;
+            DROP TABLE flakes;
+            ALTER TABLE flakes_new RENAME TO flakes;
+            ALTER TABLE device_layers_new RENAME TO device_layers;
+        """)
+        conn.execute("UPDATE flakes SET wafer_id=NULL WHERE status='used'")
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
 
 
 # ── Wafer Box CRUD ──────────────────────────────────────────────────────
@@ -271,16 +381,16 @@ def get_wafer_by_id(wafer_id: int) -> Optional[dict]:
 def create_flake(flake_id: str, wafer_id: int, material: str = "",
                  thickness: str = "", magnification: str = "",
                  photo_path: str = "", coord_x: float = 0.0,
-                 coord_y: float = 0.0, notes: str = "") -> str:
+                 coord_y: float = 0.0, notes: str = "") -> int:
     with get_conn() as conn:
-        conn.execute(
+        cur = conn.execute(
             """INSERT INTO flakes
                (flake_id, wafer_id, material, thickness, magnification,
                 photo_path, coord_x, coord_y, notes)
                VALUES (?,?,?,?,?,?,?,?,?)""",
             (flake_id, wafer_id, material, thickness, magnification,
              photo_path, coord_x, coord_y, notes))
-        return flake_id
+        return cur.lastrowid
 
 
 def get_flakes_for_wafer(wafer_id: int) -> list[dict]:
@@ -290,26 +400,38 @@ def get_flakes_for_wafer(wafer_id: int) -> list[dict]:
             (wafer_id,)).fetchall()
 
 
-def get_flake(flake_id: str) -> Optional[dict]:
+def get_flake(flake_uid: int) -> Optional[dict]:
     with get_conn() as conn:
         return conn.execute(
-            "SELECT * FROM flakes WHERE flake_id=?", (flake_id,)).fetchone()
+            "SELECT * FROM flakes WHERE flake_uid=?", (flake_uid,)).fetchone()
 
 
 def get_available_flakes(material_filter: str = "") -> list[dict]:
     with get_conn() as conn:
         if material_filter:
             return conn.execute(
-                "SELECT * FROM flakes WHERE status='available' AND material LIKE ? ORDER BY flake_id",
+                """SELECT f.*, w.row AS wafer_row, w.col AS wafer_col,
+                          w.label AS wafer_label, wb.name AS box_name
+                   FROM flakes f
+                   LEFT JOIN wafers w ON f.wafer_id = w.wafer_id
+                   LEFT JOIN wafer_boxes wb ON w.box_id = wb.box_id
+                   WHERE f.status='available' AND f.material LIKE ?
+                   ORDER BY wb.name, w.row, w.col, f.flake_id""",
                 (f"%{material_filter}%",)).fetchall()
         return conn.execute(
-            "SELECT * FROM flakes WHERE status='available' ORDER BY flake_id"
+            """SELECT f.*, w.row AS wafer_row, w.col AS wafer_col,
+                      w.label AS wafer_label, wb.name AS box_name
+               FROM flakes f
+               LEFT JOIN wafers w ON f.wafer_id = w.wafer_id
+               LEFT JOIN wafer_boxes wb ON w.box_id = wb.box_id
+               WHERE f.status='available'
+               ORDER BY wb.name, w.row, w.col, f.flake_id"""
         ).fetchall()
 
 
 def get_all_flakes() -> list[dict]:
     with get_conn() as conn:
-        return conn.execute("SELECT * FROM flakes ORDER BY flake_id").fetchall()
+        return conn.execute("SELECT * FROM flakes ORDER BY flake_uid").fetchall()
 
 
 def count_flakes() -> int:
@@ -318,7 +440,7 @@ def count_flakes() -> int:
         return row["cnt"] if row else 0
 
 
-def update_flake(flake_id: str, **kwargs):
+def update_flake(flake_uid: int, **kwargs):
     allowed = {"wafer_id", "material", "thickness", "magnification",
                "photo_path", "coord_x", "coord_y", "status",
                "used_in_device", "notes"}
@@ -327,13 +449,13 @@ def update_flake(flake_id: str, **kwargs):
         return
     sets = ", ".join(f"{k}=?" for k in fields)
     with get_conn() as conn:
-        conn.execute(f"UPDATE flakes SET {sets} WHERE flake_id=?",
-                     (*fields.values(), flake_id))
+        conn.execute(f"UPDATE flakes SET {sets} WHERE flake_uid=?",
+                     (*fields.values(), flake_uid))
 
 
-def delete_flake(flake_id: str):
+def delete_flake(flake_uid: int):
     with get_conn() as conn:
-        conn.execute("DELETE FROM flakes WHERE flake_id=?", (flake_id,))
+        conn.execute("DELETE FROM flakes WHERE flake_uid=?", (flake_uid,))
 
 
 # ── Project CRUD ────────────────────────────────────────────────────────
@@ -411,14 +533,14 @@ def create_device_with_layers(device_id: str, project_id: str,
         for order_index, layer in enumerate(layers):
             conn.execute(
                 """INSERT INTO device_layers
-                   (device_id, layer_name, flake_id, order_index)
+                   (device_id, layer_name, flake_uid, order_index)
                    VALUES (?,?,?,?)""",
-                (device_id, layer['layer_name'], layer['flake_id'], order_index))
+                (device_id, layer['layer_name'], layer['flake_uid'], order_index))
             conn.execute(
                 """UPDATE flakes
-                   SET status='used', used_in_device=?
-                   WHERE flake_id=?""",
-                (device_id, layer['flake_id']))
+                   SET wafer_id=NULL, status='used', used_in_device=?
+                   WHERE flake_uid=?""",
+                (device_id, layer['flake_uid']))
         return device_id
 
 
@@ -467,21 +589,21 @@ def delete_device(device_id: str):
 # ── Device Layer CRUD ───────────────────────────────────────────────────
 
 def add_device_layer(device_id: str, layer_name: str,
-                     flake_id: str, order_index: int = 0) -> int:
+                     flake_uid: int, order_index: int = 0) -> int:
     with get_conn() as conn:
         cur = conn.execute(
-            """INSERT INTO device_layers (device_id, layer_name, flake_id, order_index)
+            """INSERT INTO device_layers (device_id, layer_name, flake_uid, order_index)
                VALUES (?,?,?,?)""",
-            (device_id, layer_name, flake_id, order_index))
+            (device_id, layer_name, flake_uid, order_index))
         return cur.lastrowid
 
 
 def get_device_layers(device_id: str) -> list[dict]:
     with get_conn() as conn:
         return conn.execute(
-            """SELECT dl.*, f.material, f.thickness
+            """SELECT dl.*, f.flake_id, f.material, f.thickness
                FROM device_layers dl
-               LEFT JOIN flakes f ON dl.flake_id = f.flake_id
+               LEFT JOIN flakes f ON dl.flake_uid = f.flake_uid
                WHERE dl.device_id=? ORDER BY dl.order_index""",
             (device_id,)).fetchall()
 
@@ -500,15 +622,15 @@ def add_device_layers_and_mark_flakes(device_id: str, layers: list[dict],
         for offset, layer in enumerate(layers):
             conn.execute(
                 """INSERT INTO device_layers
-                   (device_id, layer_name, flake_id, order_index)
+                   (device_id, layer_name, flake_uid, order_index)
                    VALUES (?,?,?,?)""",
-                (device_id, layer['layer_name'], layer['flake_id'],
+                (device_id, layer['layer_name'], layer['flake_uid'],
                  start_index + offset))
             conn.execute(
                 """UPDATE flakes
-                   SET status='used', used_in_device=?
-                   WHERE flake_id=?""",
-                (device_id, layer['flake_id']))
+                   SET wafer_id=NULL, status='used', used_in_device=?
+                   WHERE flake_uid=?""",
+                (device_id, layer['flake_uid']))
 
 
 # ── Queries ─────────────────────────────────────────────────────────────
@@ -525,7 +647,7 @@ def get_wafer_flake_counts(box_id: int) -> dict:
     """Return {(row,col): count} for all wafers in a box."""
     with get_conn() as conn:
         rows = conn.execute(
-            """SELECT w.row, w.col, COUNT(f.flake_id) as cnt
+            """SELECT w.row, w.col, COUNT(f.flake_uid) as cnt
                FROM wafers w
                LEFT JOIN flakes f ON w.wafer_id = f.wafer_id AND f.status='available'
                WHERE w.box_id=?
