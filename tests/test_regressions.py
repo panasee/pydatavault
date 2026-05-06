@@ -48,6 +48,15 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         self.assertEqual(self.db.count_flakes(), 1)
         self.assertEqual(self.db.count_devices(), 1)
 
+    def test_missing_vault_db_path_raises_runtime_error(self):
+        original = os.environ.pop("VAULT_DB_PATH", None)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "VAULT_DB_PATH"):
+                self.config.get_root_path()
+        finally:
+            if original is not None:
+                os.environ["VAULT_DB_PATH"] = original
+
     def test_flake_ids_are_unique_per_wafer_with_internal_uids(self):
         box_id = self.db.create_box("Box Local IDs")
         wafer_a = self.db.get_or_create_wafer(box_id, 0, 0)
@@ -405,6 +414,30 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         finally:
             thumbnail.close()
 
+    def test_corrupt_extra_photos_json_warns_in_gui(self):
+        widget = self.wafer_widget.WaferWidget()
+        try:
+            with mock.patch.object(self.wafer_widget.QMessageBox, "warning") as warning:
+                paths = widget._extra_photo_paths({"extra_photos": "not json"})
+
+            self.assertEqual(paths, [])
+            warning.assert_called_once()
+            self.assertIn("extra", warning.call_args.args[2].lower())
+        finally:
+            widget.close()
+
+    def test_empty_extra_photos_json_does_not_warn(self):
+        widget = self.wafer_widget.WaferWidget()
+        try:
+            with mock.patch.object(self.wafer_widget.QMessageBox, "warning") as warning:
+                self.assertEqual(widget._extra_photo_paths({"extra_photos": ""}), [])
+                self.assertEqual(widget._extra_photo_paths({"extra_photos": "[]"}), [])
+                self.assertEqual(widget._extra_photo_paths({"extra_photos": None}), [])
+
+            warning.assert_not_called()
+        finally:
+            widget.close()
+
     def test_coordinate_diagram_thumbnails_are_larger(self):
         self.assertEqual(self.wafer_widget.WaferDiagramWidget.THUMB_W, 108)
         self.assertEqual(self.wafer_widget.WaferDiagramWidget.THUMB_H, 81)
@@ -425,6 +458,30 @@ class PyDataVaultRegressionTests(unittest.TestCase):
             self.assertEqual(diagram.ref_points[1]["x"], 1.0)
         finally:
             diagram.close()
+
+    def test_coordinate_transform_warns_when_pyflexlab_falls_back(self):
+        dialog = self.wafer_widget.CoordTransformDialog(
+            [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 0.0}],
+            [{"flake_uid": 1, "flake_id": "bf1", "coord_x": 0.5, "coord_y": 0.0}],
+        )
+        try:
+            dialog._new_x_edits[0].setText("0")
+            dialog._new_y_edits[0].setText("0")
+            dialog._new_x_edits[1].setText("1")
+            dialog._new_y_edits[1].setText("0")
+
+            with mock.patch.object(
+                self.wafer_widget.coord_utils,
+                "_pyflexlab_coor_transition",
+                side_effect=RuntimeError("pyflexlab failed"),
+                create=True,
+            ), mock.patch.object(self.wafer_widget.QMessageBox, "warning") as warning:
+                dialog._flake_combo.setCurrentIndex(1)
+
+            warning.assert_called_once()
+            self.assertIn("fallback", warning.call_args.args[2].lower())
+        finally:
+            dialog.close()
 
     def test_add_flake_dialog_has_no_material_input(self):
         dialog = self.wafer_widget.AddFlakeDialog(1)

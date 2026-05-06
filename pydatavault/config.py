@@ -5,13 +5,14 @@ from pathlib import Path
 
 
 def get_root_path() -> Path:
-    """Get the PyDataVault root path from VAULT_DB_PATH, or a local fallback."""
+    """Get the PyDataVault root path from VAULT_DB_PATH."""
     env_path = os.environ.get("VAULT_DB_PATH")
     if env_path:
         return Path(env_path)
-    fallback = Path(__file__).parent.parent / "db_test"
-    fallback.mkdir(exist_ok=True)
-    return fallback
+    raise RuntimeError(
+        "VAULT_DB_PATH is required. Set it to the PyDataVault data root "
+        "before launching PyDataVault."
+    )
 
 
 def get_pyflexlab_out_path() -> Path:

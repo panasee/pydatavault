@@ -5,12 +5,27 @@ implementation if pyflexlab is not available.
 """
 
 import math
+from collections.abc import Callable
+
+
+def _pyflexlab_coor_transition(
+    ref1: tuple, ref1_new: tuple,
+    ref2: tuple, ref2_new: tuple,
+    target: tuple,
+) -> tuple[float, float]:
+    from pyflexlab.auxiliary import Flakes
+    return Flakes.coor_transition(
+        ref1=ref1, ref1_new=ref1_new,
+        ref2=ref2, ref2_new=ref2_new,
+        target=target, suppress_print=True,
+    )
 
 
 def coor_transition(
     ref1: tuple, ref1_new: tuple,
     ref2: tuple, ref2_new: tuple,
     target: tuple,
+    on_fallback: Callable[[Exception], None] | None = None,
 ) -> tuple[float, float]:
     """Transform target coordinates from old reference frame to new.
 
@@ -26,15 +41,10 @@ def coor_transition(
         (x_new, y_new) in the new coordinate system.
     """
     try:
-        from pyflexlab.auxiliary import Flakes
-        result = Flakes.coor_transition(
-            ref1=ref1, ref1_new=ref1_new,
-            ref2=ref2, ref2_new=ref2_new,
-            target=target, suppress_print=True,
-        )
-        return result
-    except (ImportError, Exception):
-        pass
+        return _pyflexlab_coor_transition(ref1, ref1_new, ref2, ref2_new, target)
+    except Exception as exc:
+        if on_fallback is not None:
+            on_fallback(exc)
 
     # Fallback: complex-number based transformation
     rel_old = complex(ref2[0] - ref1[0], ref2[1] - ref1[1])
@@ -43,7 +53,9 @@ def coor_transition(
     dist_new = abs(rel_new)
 
     if dist_old == 0:
-        return (target[0], target[1])
+        raise ValueError("Reference points must not be identical")
+    if dist_new == 0:
+        raise ValueError("New reference points must not be identical")
 
     rot = (rel_new / dist_new) / (rel_old / dist_old)
     target_at_ori = complex(target[0] - ref1[0], target[1] - ref1[1])

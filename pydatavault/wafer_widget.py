@@ -588,10 +588,11 @@ class WaferDiagramWidget(QWidget):
     THUMB_W, THUMB_H = 108, 81
 
     def __init__(self, ref_points: list[dict], flakes: list[dict],
-                 parent=None):
+                 parent=None, fallback_warning_callback=None):
         super().__init__(parent)
         self.ref_points = ref_points
         self.flakes = flakes
+        self._fallback_warning_callback = fallback_warning_callback
         self._new_filled: list[tuple[int, tuple]] = []
         self._thumbnails: dict[int, QPixmap] = {}
         self._click_info = ""
@@ -737,7 +738,10 @@ class WaferDiagramWidget(QWidget):
         r1 = (self.ref_points[i0]["x"], self.ref_points[i0]["y"])
         r2 = (self.ref_points[i1]["x"], self.ref_points[i1]["y"])
         try:
-            return coord_utils.coor_transition(r1, c0, r2, c1, (x, y))
+            return coord_utils.coor_transition(
+                r1, c0, r2, c1, (x, y),
+                on_fallback=self._fallback_warning_callback,
+            )
         except Exception:
             return None
 
@@ -895,6 +899,7 @@ class CoordTransformDialog(QDialog):
         self.flakes = flakes
         self.setWindowTitle("Coordinate Transform")
         self.setMinimumSize(980, 420)
+        self._fallback_warning_shown = False
         self._build_ui()
 
     # ------------------------------------------------------------------ #
@@ -906,7 +911,12 @@ class CoordTransformDialog(QDialog):
         outer.setSpacing(12)
 
         # ── Left: wafer diagram ───────────────────────────────────────
-        self._diagram = WaferDiagramWidget(self.ref_points, self.flakes, self)
+        self._diagram = WaferDiagramWidget(
+            self.ref_points,
+            self.flakes,
+            self,
+            fallback_warning_callback=self._show_transform_fallback_warning,
+        )
         self._diagram.setMinimumSize(380, 340)
         outer.addWidget(self._diagram, stretch=2)
 
@@ -1018,6 +1028,17 @@ class CoordTransformDialog(QDialog):
             f"scale = {info['scale']:.6f}"
         )
 
+    def _show_transform_fallback_warning(self, exc: Exception):
+        if self._fallback_warning_shown:
+            return
+        self._fallback_warning_shown = True
+        QMessageBox.warning(
+            self,
+            "Coordinate Transform Fallback",
+            "pyflexlab coordinate transform failed, so PyDataVault is using "
+            f"its local fallback calculation for this preview.\n\n{exc}",
+        )
+
     # ------------------------------------------------------------------ #
     #  Slots                                                               #
     # ------------------------------------------------------------------ #
@@ -1103,6 +1124,7 @@ class CoordTransformDialog(QDialog):
                 old_of(i0), c0,
                 old_of(i1), c1,
                 (flake.get("coord_x", 0), flake.get("coord_y", 0)),
+                on_fallback=self._show_transform_fallback_warning,
             )
             self._flake_result_label.setText(
                 f"Old:  ({flake.get('coord_x', 0):.4f},  "
@@ -1499,9 +1521,26 @@ class WaferWidget(QWidget):
 
     def _extra_photo_paths(self, flake: dict) -> list[str]:
         """Return existing extra photo paths stored on a flake."""
+        raw_paths = flake.get('extra_photos')
+        if raw_paths in (None, "", "[]"):
+            return []
         try:
-            paths = json.loads(flake.get('extra_photos', '[]') or '[]')
-        except (TypeError, json.JSONDecodeError):
+            paths = json.loads(raw_paths)
+        except (TypeError, json.JSONDecodeError) as exc:
+            QMessageBox.warning(
+                self,
+                "Extra Photos Error",
+                "Stored extra photos data is not valid JSON. "
+                f"The extra photo list cannot be shown.\n\n{exc}",
+            )
+            return []
+        if not isinstance(paths, list):
+            QMessageBox.warning(
+                self,
+                "Extra Photos Error",
+                "Stored extra photos data is not a JSON list. "
+                "The extra photo list cannot be shown.",
+            )
             return []
         return [str(path) for path in paths if path and Path(path).exists()]
 
