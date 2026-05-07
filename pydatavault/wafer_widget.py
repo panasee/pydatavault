@@ -732,14 +732,23 @@ class WaferDiagramWidget(QWidget):
     # ── transform helper ──────────────────────────────────────────────
 
     def _fwd(self, x: float, y: float) -> tuple[float, float] | None:
-        """Forward similarity transform (old → new) for one point."""
+        """Forward coordinate transform (old → new) for one point."""
         if len(self._new_filled) < 2:
             return None
-        i0, c0 = self._new_filled[0]
-        i1, c1 = self._new_filled[1]
-        r1 = (self.ref_points[i0]["x"], self.ref_points[i0]["y"])
-        r2 = (self.ref_points[i1]["x"], self.ref_points[i1]["y"])
         try:
+            if len(self._new_filled) >= 3:
+                refs = self._new_filled[:3]
+                refs_old = [
+                    (self.ref_points[i]["x"], self.ref_points[i]["y"])
+                    for i, _coords in refs
+                ]
+                refs_new = [coords for _i, coords in refs]
+                return coord_utils.affine_transition(refs_old, refs_new, (x, y))
+
+            i0, c0 = self._new_filled[0]
+            i1, c1 = self._new_filled[1]
+            r1 = (self.ref_points[i0]["x"], self.ref_points[i0]["y"])
+            r2 = (self.ref_points[i1]["x"], self.ref_points[i1]["y"])
             return coord_utils.coor_transition(
                 r1, c0, r2, c1, (x, y),
                 on_fallback=self._fallback_warning_callback,
@@ -884,13 +893,11 @@ class CoordTransformDialog(QDialog):
     Behaviour
     ---------
     * Inputs are QLineEdit so they can be left empty ("not yet measured").
-    * As soon as **2** slots are filled the transform parameters
-      (translation dx/dy and rotation θ) are shown immediately.
-    * When all **3** slots are filled, two independent estimates are
-      computed (using pairs 1-2 and 2-3) and their deviation is shown as a
-      reliability indicator.
+    * As soon as **2** slots are filled, a simple two-point transform is shown.
+    * When all **3** slots are filled, a full affine transform is used. This
+      handles axis reflection and non-uniform X/Y scaling.
     * Selecting a flake from the combo box displays its transformed
-      new-system coordinates (always using the first two filled-in points).
+      new-system coordinates using the best available transform.
     * Nothing is written to the database — all results are temporary.
     """
 
@@ -1030,6 +1037,20 @@ class CoordTransformDialog(QDialog):
             f"scale = {info['scale']:.6f}"
         )
 
+    @staticmethod
+    def _fmt_affine_transform(info: dict, label: str = "") -> str:
+        a, b, c, d, e, f = info["coefficients"]
+        prefix = f"{label}:\n" if label else ""
+        return (
+            f"{prefix}"
+            f"x_new = {a:.6f}*x + {b:.6f}*y + {c:.4f}\n"
+            f"y_new = {d:.6f}*x + {e:.6f}*y + {f:.4f}\n"
+            f"scale_x = {info['scale_x']:.6f},  "
+            f"scale_y = {info['scale_y']:.6f},  "
+            f"det = {info['determinant']:.6f},  "
+            f"orientation = {info['orientation']}"
+        )
+
     def _show_transform_fallback_warning(self, exc: Exception):
         if self._fallback_warning_shown:
             return
@@ -1071,28 +1092,20 @@ class CoordTransformDialog(QDialog):
             text = self._fmt_transform(info, f"Ref {i0+1}+{i1+1}")
 
         else:
-            # 3 points — two independent estimates + reliability indicators
             i0, c0 = filled[0]
             i1, c1 = filled[1]
             i2, c2 = filled[2]
-            infoAB = coord_utils.compute_transform_info(
-                old_of(i0), c0, old_of(i1), c1
-            )
-            infoBC = coord_utils.compute_transform_info(
-                old_of(i1), c1, old_of(i2), c2
-            )
-            ddx  = abs(infoAB["displacement"][0] - infoBC["displacement"][0])
-            ddy  = abs(infoAB["displacement"][1] - infoBC["displacement"][1])
-            dang = abs(infoAB["rotation_deg"]    - infoBC["rotation_deg"])
-            text = (
-                f"{self._fmt_transform(infoAB, f'Ref {i0+1}+{i1+1}')}\n"
-                f"{self._fmt_transform(infoBC, f'Ref {i1+1}+{i2+1}')}\n"
-                f"Deviation:  "
-                f"Δdx = {ddx:.4f},  Δdy = {ddy:.4f},  Δθ = {dang:.4f}°\n"
-                f"Scale:  "
-                f"s({i0+1},{i1+1}) = {infoAB['scale']:.6f},  "
-                f"s({i1+1},{i2+1}) = {infoBC['scale']:.6f}"
-            )
+            try:
+                info = coord_utils.compute_affine_transform_info(
+                    [old_of(i0), old_of(i1), old_of(i2)],
+                    [c0, c1, c2],
+                )
+                text = self._fmt_affine_transform(
+                    info,
+                    f"Affine Ref {i0+1}+{i1+1}+{i2+1}",
+                )
+            except Exception as exc:
+                text = f"Affine transform error: {exc}"
 
         self._params_label.setText(text)
         self._diagram.set_new_transform(filled)
@@ -1115,19 +1128,27 @@ class CoordTransformDialog(QDialog):
             )
             return
         # Always use the first two filled points for the actual transform
-        i0, c0 = filled[0]
-        i1, c1 = filled[1]
         old_of = lambda i: (
             self.ref_points[i].get("x", 0),
             self.ref_points[i].get("y", 0),
         )
         try:
-            nx, ny = coord_utils.coor_transition(
-                old_of(i0), c0,
-                old_of(i1), c1,
-                (flake.get("coord_x", 0), flake.get("coord_y", 0)),
-                on_fallback=self._show_transform_fallback_warning,
-            )
+            if len(filled) >= 3:
+                refs = filled[:3]
+                nx, ny = coord_utils.affine_transition(
+                    [old_of(i) for i, _coords in refs],
+                    [coords for _i, coords in refs],
+                    (flake.get("coord_x", 0), flake.get("coord_y", 0)),
+                )
+            else:
+                i0, c0 = filled[0]
+                i1, c1 = filled[1]
+                nx, ny = coord_utils.coor_transition(
+                    old_of(i0), c0,
+                    old_of(i1), c1,
+                    (flake.get("coord_x", 0), flake.get("coord_y", 0)),
+                    on_fallback=self._show_transform_fallback_warning,
+                )
             self._flake_result_label.setText(
                 f"Old:  ({flake.get('coord_x', 0):.4f},  "
                 f"{flake.get('coord_y', 0):.4f})\n"

@@ -484,6 +484,58 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_affine_transform_handles_reflected_y_axis_and_nonuniform_scale(self):
+        result = self.wafer_widget.coord_utils.affine_transition(
+            refs_old=[(0.0, 0.0), (10.0, 0.0), (0.0, 5.0)],
+            refs_new=[(100.0, 200.0), (120.0, 200.0), (100.0, 185.0)],
+            target=(4.0, 2.0),
+        )
+
+        self.assertAlmostEqual(result[0], 108.0)
+        self.assertAlmostEqual(result[1], 194.0)
+
+    def test_coordinate_transform_dialog_uses_three_point_affine_for_reflected_axes(self):
+        dialog = self.wafer_widget.CoordTransformDialog(
+            [
+                {"x": 0.0, "y": 0.0},
+                {"x": 10.0, "y": 0.0},
+                {"x": 0.0, "y": 5.0},
+            ],
+            [{"flake_uid": 1, "flake_id": "bf1", "coord_x": 4.0, "coord_y": 2.0}],
+        )
+        try:
+            values = [
+                ("100", "200"),
+                ("120", "200"),
+                ("100", "185"),
+            ]
+            for idx, (x_value, y_value) in enumerate(values):
+                dialog._new_x_edits[idx].setText(x_value)
+                dialog._new_y_edits[idx].setText(y_value)
+
+            dialog._flake_combo.setCurrentIndex(1)
+
+            self.assertIn("New:  (108.0000,  194.0000)", dialog._flake_result_label.text())
+        finally:
+            dialog.close()
+
+    def test_coordinate_transform_dialog_keeps_two_point_simple_transform(self):
+        dialog = self.wafer_widget.CoordTransformDialog(
+            [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 0.0}],
+            [{"flake_uid": 1, "flake_id": "bf1", "coord_x": 0.5, "coord_y": 0.0}],
+        )
+        try:
+            dialog._new_x_edits[0].setText("10")
+            dialog._new_y_edits[0].setText("20")
+            dialog._new_x_edits[1].setText("11")
+            dialog._new_y_edits[1].setText("20")
+
+            dialog._flake_combo.setCurrentIndex(1)
+
+            self.assertIn("New:  (10.5000,  20.0000)", dialog._flake_result_label.text())
+        finally:
+            dialog.close()
+
     def test_add_flake_dialog_has_no_material_input(self):
         dialog = self.wafer_widget.AddFlakeDialog(1)
         try:
