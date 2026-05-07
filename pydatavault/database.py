@@ -110,6 +110,7 @@ def init_db():
     with get_conn() as conn:
         conn.executescript(SCHEMA)
     _migrate()
+    _normalize_stored_data_paths()
 
 
 def _migrate():
@@ -286,6 +287,76 @@ def _rebuild_flake_schema(conn, flake_columns: dict, layer_columns: dict):
         conn.execute("UPDATE flakes SET wafer_id=NULL WHERE status='used'")
     finally:
         conn.execute("PRAGMA foreign_keys = ON")
+
+
+def _relative_data_path_or_original(path_value: str) -> str:
+    if not path_value:
+        return path_value
+    resolved = config.resolve_data_path(path_value)
+    normalized = config.to_data_path(resolved)
+    return path_value if Path(normalized).is_absolute() else normalized
+
+
+def _normalize_extra_photos(raw_paths: str) -> str:
+    if raw_paths in (None, "", "[]"):
+        return raw_paths
+    try:
+        paths = json.loads(raw_paths)
+    except (TypeError, json.JSONDecodeError):
+        return raw_paths
+    if not isinstance(paths, list):
+        return raw_paths
+    normalized = [
+        _relative_data_path_or_original(str(path)) if path else path
+        for path in paths
+    ]
+    return json.dumps(normalized, ensure_ascii=False)
+
+
+def _normalize_ref_points(raw_points: str) -> str:
+    if raw_points in (None, "", "[]"):
+        return raw_points
+    try:
+        points = json.loads(raw_points)
+    except (TypeError, json.JSONDecodeError):
+        return raw_points
+    if not isinstance(points, list):
+        return raw_points
+    changed_points = []
+    for point in points:
+        if isinstance(point, dict) and point.get("photo_path"):
+            point = dict(point)
+            point["photo_path"] = _relative_data_path_or_original(point["photo_path"])
+        changed_points.append(point)
+    return json.dumps(changed_points, ensure_ascii=False)
+
+
+def _normalize_stored_data_paths():
+    """Convert PyDataVault-owned stored paths to VAULT_DB_PATH-relative values."""
+    with get_conn() as conn:
+        for flake in conn.execute(
+            "SELECT flake_uid, photo_path, extra_photos FROM flakes"
+        ).fetchall():
+            photo_path = _relative_data_path_or_original(flake.get("photo_path", ""))
+            extra_photos = _normalize_extra_photos(flake.get("extra_photos", "[]"))
+            if (
+                photo_path != flake.get("photo_path", "")
+                or extra_photos != flake.get("extra_photos", "[]")
+            ):
+                conn.execute(
+                    "UPDATE flakes SET photo_path=?, extra_photos=? WHERE flake_uid=?",
+                    (photo_path, extra_photos, flake["flake_uid"]),
+                )
+
+        for wafer in conn.execute(
+            "SELECT wafer_id, ref_points FROM wafers"
+        ).fetchall():
+            ref_points = _normalize_ref_points(wafer.get("ref_points", "[]"))
+            if ref_points != wafer.get("ref_points", "[]"):
+                conn.execute(
+                    "UPDATE wafers SET ref_points=? WHERE wafer_id=?",
+                    (ref_points, wafer["wafer_id"]),
+                )
 
 
 # ── Wafer Box CRUD ──────────────────────────────────────────────────────

@@ -52,6 +52,48 @@ TEMPLATES_DIR = ROOT_PATH / "templates"
 PYFLEXLAB_OUT_PATH = get_pyflexlab_out_path()
 
 
+def to_data_path(path: str | Path) -> str:
+    """Store PyDataVault-owned paths relative to VAULT_DB_PATH."""
+    target = Path(path)
+    try:
+        return str(target.resolve().relative_to(ROOT_PATH.resolve()))
+    except (OSError, ValueError):
+        return str(target)
+
+
+def resolve_data_path(path: str | Path) -> Path:
+    """Resolve stored paths against the current VAULT_DB_PATH.
+
+    New database values should be relative to VAULT_DB_PATH.  Absolute paths
+    are accepted only for compatibility with older databases created on a
+    different Windows account or machine.
+    """
+    target = Path(path)
+    if not path:
+        return target
+    if not target.is_absolute():
+        return ROOT_PATH / target
+    if target.exists():
+        return target
+
+    parts = list(target.parts)
+    lower_parts = [part.lower() for part in parts]
+    markers = (
+        ("shared", "flakes"),
+        ("shared", "wafer_refs"),
+        ("projects",),
+        (".labdb",),
+    )
+    for marker in markers:
+        marker_len = len(marker)
+        for idx in range(len(lower_parts) - marker_len + 1):
+            if tuple(lower_parts[idx:idx + marker_len]) == marker:
+                candidate = ROOT_PATH.joinpath(*parts[idx:])
+                if candidate.exists():
+                    return candidate
+    return target
+
+
 def ensure_dirs():
     """Create all PyDataVault-owned directories.
 

@@ -1,4 +1,5 @@
 import logging
+import json
 import os
 import shutil
 import time
@@ -330,15 +331,37 @@ class ProjectWidget(QWidget):
 
         device_id = self.device_table.item(row, 0).text()
         device = db.get_device(device_id)
+        device_layers = db.get_device_layers(device_id)
+        is_retired = device and device.get("status") == "retired"
+        if device_layers and is_retired:
+            title = "Confirm Permanent Delete"
+            message = (
+                f"Permanently delete retired device '{device_id}'? "
+                "This will remove the device record and its layer links. "
+                "Consumed flakes will remain in the database."
+            )
+        else:
+            title = "Confirm Delete"
+            message = f"Delete device '{device_id}'? This cannot be undone."
 
         reply = QMessageBox.question(
-            self, "Confirm Delete",
-            f"Delete device '{device_id}'? This cannot be undone.",
+            self, title,
+            message,
             QMessageBox.Yes | QMessageBox.No
         )
 
         if reply == QMessageBox.Yes:
             try:
+                if device_layers and not is_retired:
+                    db.update_device(device_id, status="retired")
+                    self.load_devices(self.current_project_id)
+                    QMessageBox.information(
+                        self,
+                        "Success",
+                        "Device has consumed flakes and was marked retired instead of deleted.",
+                    )
+                    return
+
                 fab_dir = config.PROJECTS_DIR / self.current_project_id / "fabrication" / device_id
                 if fab_dir.exists():
                     ProjectWidget._remove_directory_best_effort(fab_dir)
@@ -403,6 +426,34 @@ class ProjectWidget(QWidget):
             os.startfile(str(meas_path)) if os.name == 'nt' else os.system(f'open "{meas_path}"')
         else:
             QMessageBox.warning(self, "Warning", "Measurement folder does not exist")
+
+    @staticmethod
+    def write_used_flakes_index(project_id: str, device_id: str, layers: list[dict]):
+        """Write a small device-local index of consumed flake identifiers."""
+        fab_dir = config.PROJECTS_DIR / project_id / "fabrication" / device_id
+        fab_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": 1,
+            "project_id": project_id,
+            "device_id": device_id,
+            "layers": [
+                {
+                    "order_index": order_index,
+                    "layer_name": layer.get("layer_name", ""),
+                    "flake_uid": layer.get("flake_uid"),
+                    "flake_id": layer.get("flake_id"),
+                    "material": layer.get("material", ""),
+                }
+                for order_index, layer in enumerate(layers)
+            ],
+        }
+        index_path = fab_dir / "used_flakes.json"
+        tmp_path = index_path.with_name(f"{index_path.name}.tmp")
+        tmp_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        tmp_path.replace(index_path)
 
 
 class NewProjectDialog(QDialog):
@@ -592,7 +643,7 @@ class NewDeviceDialog(QDialog):
 
         try:
             fab_dir = config.PROJECTS_DIR / self.project_id / "fabrication" / device_id
-            fab_path = str(fab_dir)
+            fab_path = config.to_data_path(fab_dir)
 
             meas_target = config.PYFLEXLAB_OUT_PATH / device_id
 
@@ -617,6 +668,7 @@ class NewDeviceDialog(QDialog):
                 meas_path=str(meas_target),
                 notes=""
             )
+            ProjectWidget.write_used_flakes_index(self.project_id, device_id, self.layers)
 
             # Symlink from project tree → pyflexlab data directory
             meas_link = config.PROJECTS_DIR / self.project_id / "measurements" / device_id
@@ -739,6 +791,11 @@ class EditDeviceDialog(QDialog):
                 self.device['device_id'],
                 new_layers,
                 start_index=existing_count,
+            )
+            ProjectWidget.write_used_flakes_index(
+                self.project_id,
+                self.device['device_id'],
+                self.layers,
             )
 
             super().accept()

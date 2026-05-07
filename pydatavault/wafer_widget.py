@@ -361,12 +361,12 @@ class ExtraPhotoThumbnail(QLabel):
 
     def __init__(self, photo_path: str, parent=None):
         super().__init__(parent)
-        self.photo_path = photo_path
+        self.photo_path = str(config.resolve_data_path(photo_path))
         self.setFixedSize(140, 140)
         self.setAlignment(Qt.AlignCenter)
         self.setWordWrap(True)
         self.setToolTip(photo_path)
-        pixmap = QPixmap(photo_path)
+        pixmap = QPixmap(self.photo_path)
         if pixmap.isNull():
             self.setText(Path(photo_path).name)
         else:
@@ -460,8 +460,9 @@ class RefPointSlot(QWidget):
     # ── internal helpers ────────────────────────────────────────────────
 
     def _update_thumb(self):
-        if self._photo_path and Path(self._photo_path).exists():
-            px = QPixmap(self._photo_path).scaled(
+        photo_path = config.resolve_data_path(self._photo_path) if self._photo_path else None
+        if photo_path and photo_path.exists():
+            px = QPixmap(str(photo_path)).scaled(
                 120, 90, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.thumb.setPixmap(px)
         else:
@@ -495,7 +496,7 @@ class RefPointSlot(QWidget):
         """
         if not self._photo_path:
             return None
-        src = Path(self._photo_path)
+        src = config.resolve_data_path(self._photo_path)
         dest = dest_dir / src.name
         if src != dest:
             dest_dir.mkdir(parents=True, exist_ok=True)
@@ -503,7 +504,7 @@ class RefPointSlot(QWidget):
         return {
             'x': self.x_spin.value(),
             'y': self.y_spin.value(),
-            'photo_path': str(dest),
+            'photo_path': config.to_data_path(dest),
         }
 
 
@@ -614,8 +615,9 @@ class WaferDiagramWidget(QWidget):
     def _load_thumbnails(self):
         for i, rp in enumerate(self.ref_points):
             path = rp.get("photo_path", "")
-            if path and Path(path).exists():
-                pm = QPixmap(str(path))
+            photo_path = config.resolve_data_path(path) if path else None
+            if photo_path and photo_path.exists():
+                pm = QPixmap(str(photo_path))
                 if not pm.isNull():
                     self._thumbnails[i] = pm.scaled(
                         self.THUMB_W, self.THUMB_H,
@@ -1487,7 +1489,8 @@ class WaferWidget(QWidget):
                 return
             lines = []
             for i, rp in enumerate(ref_points):
-                photo_ok = "📷" if rp.get('photo_path') and Path(rp['photo_path']).exists() else "—"
+                photo_path = config.resolve_data_path(rp['photo_path']) if rp.get('photo_path') else None
+                photo_ok = "📷" if photo_path and photo_path.exists() else "—"
                 lines.append(f"Ref {i+1}: {photo_ok}  ({rp.get('x', 0):.2f}, {rp.get('y', 0):.2f})")
             self.ref_points_label.setText("\n".join(lines))
         except Exception:
@@ -1542,7 +1545,14 @@ class WaferWidget(QWidget):
                 "The extra photo list cannot be shown.",
             )
             return []
-        return [str(path) for path in paths if path and Path(path).exists()]
+        resolved_paths = []
+        for path in paths:
+            if not path:
+                continue
+            resolved = config.resolve_data_path(path)
+            if resolved.exists():
+                resolved_paths.append(str(resolved))
+        return resolved_paths
 
     def show_extra_photos(self, photo_paths: list[str]):
         """Show extra flake photos in a thumbnail grid."""
@@ -1729,7 +1739,7 @@ class WaferWidget(QWidget):
                     flake_dir = config.FLAKES_DIR / str(flake_uid)
                     flake_dir.mkdir(parents=True, exist_ok=True)
                     dest = WaferWidget._copy_photo_to_dir(data['photo_path'], flake_dir)
-                    db.update_flake(flake_uid, photo_path=str(dest))
+                    db.update_flake(flake_uid, photo_path=config.to_data_path(dest))
                 except Exception:
                     db.delete_flake(flake_uid)
                     shutil.rmtree(config.FLAKES_DIR / str(flake_uid), ignore_errors=True)
@@ -1742,7 +1752,7 @@ class WaferWidget(QWidget):
                     extra_dir = flake_dir / "extra"
                     extra_dir.mkdir(parents=True, exist_ok=True)
                     copied_paths = [
-                        str(WaferWidget._copy_photo_to_dir(path, extra_dir))
+                        config.to_data_path(WaferWidget._copy_photo_to_dir(path, extra_dir))
                         for path in extra_photo_paths
                     ]
                     db.update_flake(flake_uid, extra_photos=json.dumps(copied_paths))
@@ -1814,7 +1824,7 @@ class WaferWidget(QWidget):
         if managed_dir.parent != flakes_root or not managed_dir.exists():
             return
 
-        photo_path = Path(flake['photo_path']).resolve()
+        photo_path = config.resolve_data_path(flake['photo_path']).resolve()
         if photo_path == managed_dir or managed_dir in photo_path.parents:
             for attempt in range(3):
                 try:
@@ -1862,7 +1872,7 @@ class WaferWidget(QWidget):
                 QMessageBox.warning(self, "Error", "No photo available for this flake")
                 return
 
-            photo_path = Path(flake['photo_path'])
+            photo_path = config.resolve_data_path(flake['photo_path'])
             if photo_path.exists():
                 QDesktopServices.openUrl(QUrl.fromLocalFile(str(photo_path)))
             else:

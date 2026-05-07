@@ -350,7 +350,8 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         extra_photos = json.loads(flake["extra_photos"])
         self.assertEqual(len(extra_photos), 2)
         for path in extra_photos:
-            copied = Path(path)
+            self.assertFalse(Path(path).is_absolute())
+            copied = self.config.resolve_data_path(path)
             self.assertTrue(copied.exists())
             self.assertEqual(copied.parents[1], self.config.FLAKES_DIR / str(flake["flake_uid"]))
 
@@ -594,7 +595,62 @@ class PyDataVaultRegressionTests(unittest.TestCase):
                 self.wafer_widget.QDesktopServices,
                 "openUrl",
                 return_value=True,
-            ) as open_url:
+            ) as open_url, mock.patch.object(
+                self.wafer_widget.QMessageBox,
+                "warning",
+            ):
+                widget.view_photo()
+
+            open_url.assert_called_once()
+            self.assertEqual(
+                Path(open_url.call_args.args[0].toLocalFile()),
+                photo_path,
+            )
+        finally:
+            widget.close()
+
+    def test_view_photo_rebases_managed_onedrive_path_to_current_root(self):
+        box_id = self.db.create_box("Box View Rebased Photo")
+        wafer = self.db.get_or_create_wafer(box_id, 0, 0)
+        flake_uid = self.db.create_flake("bf-rebased", wafer["wafer_id"])
+        flake_dir = self.config.FLAKES_DIR / str(flake_uid)
+        flake_dir.mkdir(parents=True, exist_ok=True)
+        photo_path = flake_dir / "bf.jpg"
+        photo_path.write_bytes(b"fake image")
+        old_machine_path = (
+            Path("C:/Users/Dongkai/OneDrive - Nanyang Technological University")
+            / "dongkai-db"
+            / "shared"
+            / "flakes"
+            / str(flake_uid)
+            / "bf.jpg"
+        )
+        self.db.update_flake(flake_uid, photo_path=str(old_machine_path))
+        self.db.init_db()
+        stored_path = self.db.get_flake(flake_uid)["photo_path"]
+        self.assertFalse(Path(stored_path).is_absolute())
+        self.assertEqual(
+            self.config.resolve_data_path(stored_path),
+            photo_path,
+        )
+
+        widget = self.wafer_widget.WaferWidget()
+        try:
+            widget.current_wafer_id = wafer["wafer_id"]
+            widget.flake_table.setRowCount(1)
+            item = self.wafer_widget.QTableWidgetItem("bf-rebased")
+            item.setData(self.wafer_widget.Qt.UserRole, flake_uid)
+            widget.flake_table.setItem(0, 0, item)
+            widget.flake_table.selectRow(0)
+
+            with mock.patch.object(
+                self.wafer_widget.QDesktopServices,
+                "openUrl",
+                return_value=True,
+            ) as open_url, mock.patch.object(
+                self.wafer_widget.QMessageBox,
+                "warning",
+            ):
                 widget.view_photo()
 
             open_url.assert_called_once()
@@ -942,6 +998,16 @@ class PyDataVaultRegressionTests(unittest.TestCase):
             material="Replacement Graphene",
         )
         self.assertNotEqual(replacement_uid, flake_uid)
+        index_path = (
+            self.config.PROJECTS_DIR
+            / "proj"
+            / "fabrication"
+            / "device-edit"
+            / "used_flakes.json"
+        )
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["layers"][0]["flake_uid"], flake_uid)
+        self.assertEqual(payload["layers"][0]["flake_id"], "flake-edit")
 
     def test_new_device_dialog_rolls_back_database_when_measurement_setup_fails(self):
         self.db.create_project("proj", "Project")
@@ -954,6 +1020,48 @@ class PyDataVaultRegressionTests(unittest.TestCase):
             dialog.accept()
 
         self.assertIsNone(self.db.get_device("device-fail"))
+
+    def test_new_device_dialog_writes_used_flake_index(self):
+        box_id = self.db.create_box("Box Device Index")
+        wafer = self.db.get_or_create_wafer(box_id, 0, 0)
+        flake_uid = self.db.create_flake("flake-index", wafer["wafer_id"], material="hBN")
+        self.db.create_project("proj-index", "Project Index")
+
+        dialog = self.project_widget.NewDeviceDialog("proj-index")
+        dialog.device_id_edit.setText("device-index")
+        dialog.layers = [{
+            "layer_name": "topbn",
+            "flake_uid": flake_uid,
+            "flake_id": "flake-index",
+            "material": "hBN",
+        }]
+
+        with mock.patch("pyflexlab.file_organizer.FileOrganizer"), \
+             mock.patch.object(self.project_widget.os, "symlink"):
+            dialog.accept()
+
+        index_path = (
+            self.config.PROJECTS_DIR
+            / "proj-index"
+            / "fabrication"
+            / "device-index"
+            / "used_flakes.json"
+        )
+        self.assertTrue(index_path.exists())
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["project_id"], "proj-index")
+        self.assertEqual(payload["device_id"], "device-index")
+        self.assertEqual(
+            payload["layers"],
+            [{
+                "order_index": 0,
+                "layer_name": "topbn",
+                "flake_uid": flake_uid,
+                "flake_id": "flake-index",
+                "material": "hBN",
+            }],
+        )
 
     def test_delete_device_ignores_fabrication_directory_access_denied(self):
         self.db.create_project("proj-delete", "Project Delete")
@@ -1002,6 +1110,153 @@ class PyDataVaultRegressionTests(unittest.TestCase):
             self.project_widget.ProjectWidget.on_delete_device(DummyWidget())
 
         self.assertIsNone(self.db.get_device("device-denied"))
+        critical.assert_not_called()
+
+    def test_delete_device_with_consumed_flakes_retires_instead_of_removing_files(self):
+        box_id = self.db.create_box("Box Retire Device")
+        wafer = self.db.get_or_create_wafer(box_id, 0, 0)
+        flake_uid = self.db.create_flake("flake-retire", wafer["wafer_id"], material="hBN")
+        self.db.create_project("proj-retire", "Project Retire")
+        self.db.create_device_with_layers(
+            "device-retire",
+            "proj-retire",
+            [{
+                "layer_name": "topbn",
+                "flake_uid": flake_uid,
+                "flake_id": "flake-retire",
+                "material": "hBN",
+            }],
+        )
+        self.project_widget.ProjectWidget.write_used_flakes_index(
+            "proj-retire",
+            "device-retire",
+            [{
+                "layer_name": "topbn",
+                "flake_uid": flake_uid,
+                "flake_id": "flake-retire",
+                "material": "hBN",
+            }],
+        )
+        fab_dir = (
+            self.config.PROJECTS_DIR
+            / "proj-retire"
+            / "fabrication"
+            / "device-retire"
+        )
+        index_path = fab_dir / "used_flakes.json"
+
+        class DummyItem:
+            def text(self):
+                return "device-retire"
+
+        class DummyTable:
+            def currentRow(self):
+                return 0
+
+            def item(self, row, col):
+                return DummyItem()
+
+        class DummyWidget:
+            current_project_id = "proj-retire"
+            device_table = DummyTable()
+
+            def load_devices(self, project_id):
+                pass
+
+        with mock.patch.object(
+            self.project_widget.QMessageBox,
+            "question",
+            return_value=self.project_widget.QMessageBox.Yes,
+        ), mock.patch.object(
+            self.project_widget.QMessageBox,
+            "information",
+        ), mock.patch.object(
+            self.project_widget.QMessageBox,
+            "critical",
+        ) as critical:
+            self.project_widget.ProjectWidget.on_delete_device(DummyWidget())
+
+        device = self.db.get_device("device-retire")
+        self.assertIsNotNone(device)
+        self.assertEqual(device["status"], "retired")
+        self.assertTrue(index_path.exists())
+        self.assertEqual(len(self.db.get_device_layers("device-retire")), 1)
+        flake = self.db.get_flake(flake_uid)
+        self.assertEqual(flake["status"], "used")
+        self.assertEqual(flake["used_in_device"], "device-retire")
+        critical.assert_not_called()
+
+    def test_delete_retired_device_with_consumed_flakes_permanently_deletes_after_confirmation(self):
+        box_id = self.db.create_box("Box Permanent Delete Device")
+        wafer = self.db.get_or_create_wafer(box_id, 0, 0)
+        flake_uid = self.db.create_flake("flake-permadelete", wafer["wafer_id"], material="hBN")
+        self.db.create_project("proj-permadelete", "Project Permanent Delete")
+        self.db.create_device_with_layers(
+            "device-permadelete",
+            "proj-permadelete",
+            [{
+                "layer_name": "topbn",
+                "flake_uid": flake_uid,
+                "flake_id": "flake-permadelete",
+                "material": "hBN",
+            }],
+            status="retired",
+        )
+        fab_dir = (
+            self.config.PROJECTS_DIR
+            / "proj-permadelete"
+            / "fabrication"
+            / "device-permadelete"
+        )
+        fab_dir.mkdir(parents=True)
+        meas_link = (
+            self.config.PROJECTS_DIR
+            / "proj-permadelete"
+            / "measurements"
+            / "device-permadelete"
+        )
+        meas_link.parent.mkdir(parents=True)
+        meas_link.write_text("link placeholder", encoding="utf-8")
+
+        class DummyItem:
+            def text(self):
+                return "device-permadelete"
+
+        class DummyTable:
+            def currentRow(self):
+                return 0
+
+            def item(self, row, col):
+                return DummyItem()
+
+        class DummyWidget:
+            current_project_id = "proj-permadelete"
+            device_table = DummyTable()
+
+            def load_devices(self, project_id):
+                pass
+
+        with mock.patch.object(
+            self.project_widget.QMessageBox,
+            "question",
+            return_value=self.project_widget.QMessageBox.Yes,
+        ) as question, mock.patch.object(
+            self.project_widget.QMessageBox,
+            "information",
+        ), mock.patch.object(
+            self.project_widget.QMessageBox,
+            "critical",
+        ) as critical:
+            self.project_widget.ProjectWidget.on_delete_device(DummyWidget())
+
+        self.assertIsNone(self.db.get_device("device-permadelete"))
+        self.assertEqual(self.db.get_device_layers("device-permadelete"), [])
+        self.assertFalse(fab_dir.exists())
+        self.assertFalse(meas_link.exists())
+        flake = self.db.get_flake(flake_uid)
+        self.assertEqual(flake["status"], "used")
+        self.assertIsNone(flake["used_in_device"])
+        self.assertIn("Permanently delete retired device", question.call_args.args[2])
         critical.assert_not_called()
 
 
