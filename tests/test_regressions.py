@@ -544,6 +544,19 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_add_flake_dialog_accepts_micrometer_scale_coordinates(self):
+        dialog = self.wafer_widget.AddFlakeDialog(1)
+        try:
+            dialog.coord_x.setValue(1_234_567.8912)
+            dialog.coord_y.setValue(-7_654_321.1234)
+
+            data = dialog.get_data()
+
+            self.assertAlmostEqual(data["coord_x"], 1_234_567.8912, places=4)
+            self.assertAlmostEqual(data["coord_y"], -7_654_321.1234, places=4)
+        finally:
+            dialog.close()
+
     def test_add_flake_dialog_collects_extra_photo_paths(self):
         dialog = self.wafer_widget.AddFlakeDialog(1)
         try:
@@ -559,6 +572,144 @@ class PyDataVaultRegressionTests(unittest.TestCase):
             self.assertEqual(dialog.extra_photo_label.text(), "2 selected")
         finally:
             dialog.close()
+
+    def test_add_flake_dialog_screenshot_photo_replaces_existing_photo(self):
+        dialog = self.wafer_widget.AddFlakeDialog(1)
+        try:
+            with mock.patch.object(
+                self.wafer_widget,
+                "capture_screen_region",
+                side_effect=["first-shot.png", "second-shot.png"],
+            ):
+                dialog.capture_photo()
+                dialog.capture_photo()
+
+            self.assertEqual(dialog.get_data()["photo_path"], "second-shot.png")
+            self.assertEqual(dialog.photo_label.text(), "second-shot.png")
+        finally:
+            dialog.close()
+
+    def test_add_flake_dialog_extra_photos_accumulate_from_screenshot_and_files(self):
+        dialog = self.wafer_widget.AddFlakeDialog(1)
+        try:
+            with mock.patch.object(
+                self.wafer_widget,
+                "capture_screen_region",
+                side_effect=["shot-1.png", "shot-2.png"],
+            ):
+                dialog.capture_extra_photo()
+
+                with mock.patch.object(
+                    self.wafer_widget.QFileDialog,
+                    "getOpenFileNames",
+                    return_value=(["extra-1.png", "extra-2.png"], ""),
+                ):
+                    dialog.select_extra_photos()
+
+                dialog.capture_extra_photo()
+
+            self.assertEqual(
+                dialog.get_data()["extra_photo_paths"],
+                ["shot-1.png", "extra-1.png", "extra-2.png", "shot-2.png"],
+            )
+            self.assertEqual(dialog.extra_photo_label.text(), "4 selected")
+        finally:
+            dialog.close()
+
+    def test_screen_capture_restores_modal_dialog_before_region_selection(self):
+        wafer_widget = self.wafer_widget
+        test_case = self
+
+        class FakeWidget:
+            def __init__(self):
+                self.visible = True
+                self.hide_called = False
+                self.opacity = 1.0
+
+            def isVisible(self):
+                return self.visible
+
+            def hide(self):
+                self.hide_called = True
+                self.visible = False
+
+            def show(self):
+                self.visible = True
+
+            def windowOpacity(self):
+                return self.opacity
+
+            def setWindowOpacity(self, value):
+                self.opacity = value
+
+        class FakeApp:
+            def __init__(self, widget):
+                self.widget = widget
+
+            def topLevelWidgets(self):
+                return [self.widget]
+
+            def processEvents(self):
+                pass
+
+            def primaryScreen(self):
+                return FakeScreen()
+
+        class FakeScreen:
+            def geometry(self):
+                return wafer_widget.QRect(0, 0, 10, 10)
+
+            def grabWindow(self, window_id):
+                pixmap = wafer_widget.QPixmap(10, 10)
+                pixmap.fill(wafer_widget.QColor("white"))
+                return pixmap
+
+        visible_widget = FakeWidget()
+
+        class FakeCaptureDialog:
+            def __init__(self, screenshot, screen_rect):
+                pass
+
+            def exec(self):
+                test_case.assertTrue(visible_widget.isVisible())
+                return wafer_widget.QDialog.Accepted
+
+            def selected_pixmap(self):
+                pixmap = wafer_widget.QPixmap(2, 2)
+                pixmap.fill(wafer_widget.QColor("white"))
+                return pixmap
+
+        fake_app = FakeApp(visible_widget)
+        with mock.patch.object(
+            self.wafer_widget.QApplication,
+            "instance",
+            return_value=fake_app,
+        ), mock.patch.object(
+            self.wafer_widget,
+            "ScreenRegionCaptureDialog",
+            FakeCaptureDialog,
+        ):
+            path = self.wafer_widget.capture_screen_region()
+
+        self.assertIsNotNone(path)
+        self.assertTrue(visible_widget.isVisible())
+        self.assertFalse(visible_widget.hide_called)
+        self.assertEqual(visible_widget.opacity, 1.0)
+
+    def test_ref_point_slot_screenshot_replaces_photo(self):
+        slot = self.wafer_widget.RefPointSlot(0, {"photo_path": "old.png", "x": 1, "y": 2})
+        try:
+            with mock.patch.object(
+                self.wafer_widget,
+                "capture_screen_region",
+                side_effect=["first-ref.png", "second-ref.png"],
+            ):
+                slot._capture_photo()
+                slot._capture_photo()
+
+            self.assertEqual(slot._photo_path, "second-ref.png")
+        finally:
+            slot.close()
 
     def test_loading_flakes_does_not_trigger_partial_row_update(self):
         box_id = self.db.create_box("Box Load Flakes")

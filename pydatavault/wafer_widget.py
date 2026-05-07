@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QPushButton, QTableWidget, QTableWidgetItem, QDialog, QLabel, QLineEdit,
     QSpinBox, QDoubleSpinBox, QTextEdit, QMessageBox, QFileDialog,
     QHeaderView, QComboBox, QSizePolicy, QFormLayout, QDialogButtonBox,
-    QGridLayout, QScrollArea
+    QGridLayout, QScrollArea, QApplication
 )
 from PySide6.QtCore import Qt, Signal, QSize, QRect, QPoint, QPointF, QRectF, QUrl
 from PySide6.QtGui import (
@@ -26,6 +26,154 @@ from . import style
 
 
 logger = logging.getLogger("PyOmnix")
+
+
+class ScreenRegionCaptureDialog(QDialog):
+    """Fullscreen overlay for selecting a rectangular screenshot region."""
+
+    def __init__(self, screenshot: QPixmap, screen_rect: QRect, parent=None):
+        super().__init__(parent)
+        self.screenshot = screenshot
+        self.selected_rect = QRect()
+        self._drag_start: QPoint | None = None
+        self._drag_current: QPoint | None = None
+        self.setWindowTitle("Select Screenshot Region")
+        self.setWindowFlags(
+            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+        )
+        self.setWindowModality(Qt.ApplicationModal)
+        self.setCursor(Qt.CrossCursor)
+        self.setGeometry(screen_rect)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.drawPixmap(self.rect(), self.screenshot)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 80))
+
+        selection = self._current_selection()
+        if not selection.isNull():
+            painter.drawPixmap(selection, self.screenshot, self._source_rect(selection))
+            painter.setPen(QPen(QColor("#38bdf8"), 2))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(selection.adjusted(0, 0, -1, -1))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_start = event.pos()
+            self._drag_current = event.pos()
+            self.update()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start is not None:
+            self._drag_current = event.pos()
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() != Qt.LeftButton or self._drag_start is None:
+            return
+        self._drag_current = event.pos()
+        selection = self._current_selection()
+        if selection.width() >= 4 and selection.height() >= 4:
+            self.selected_rect = selection
+            self.accept()
+        else:
+            self._drag_start = None
+            self._drag_current = None
+            self.update()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.reject()
+            return
+        super().keyPressEvent(event)
+
+    def selected_pixmap(self) -> QPixmap:
+        if self.selected_rect.isNull():
+            return QPixmap()
+        source_rect = self._source_rect(self.selected_rect)
+        return self.screenshot.copy(source_rect)
+
+    def _current_selection(self) -> QRect:
+        if self._drag_start is None or self._drag_current is None:
+            return QRect()
+        return QRect(self._drag_start, self._drag_current).normalized()
+
+    def _source_rect(self, displayed_rect: QRect) -> QRect:
+        if self.width() <= 0 or self.height() <= 0:
+            return displayed_rect
+        x_scale = self.screenshot.width() / self.width()
+        y_scale = self.screenshot.height() / self.height()
+        return QRect(
+            round(displayed_rect.x() * x_scale),
+            round(displayed_rect.y() * y_scale),
+            round(displayed_rect.width() * x_scale),
+            round(displayed_rect.height() * y_scale),
+        )
+
+
+def capture_screen_region(parent=None) -> str | None:
+    """Capture a user-selected screen region and return the saved PNG path."""
+    app = QApplication.instance()
+    if app is None:
+        return None
+
+    screen = None
+    if parent is not None:
+        window = parent.window()
+        if window is not None:
+            screen = window.screen()
+    screen = screen or app.primaryScreen()
+    if screen is None:
+        return None
+
+    dimmed_widgets = [
+        (w, w.windowOpacity()) for w in app.topLevelWidgets() if w.isVisible()
+    ]
+    widgets_dimmed = False
+
+    def restore_dimmed_widgets():
+        nonlocal widgets_dimmed
+        if not widgets_dimmed:
+            return
+        for widget, opacity in dimmed_widgets:
+            widget.setWindowOpacity(opacity)
+        if parent is not None:
+            parent_window = parent.window()
+            if parent_window is not None:
+                parent_window.raise_()
+                parent_window.activateWindow()
+        app.processEvents()
+        widgets_dimmed = False
+
+    for widget, _opacity in dimmed_widgets:
+        widget.setWindowOpacity(0.0)
+    widgets_dimmed = True
+    app.processEvents()
+    time.sleep(0.2)
+
+    try:
+        screenshot = screen.grabWindow(0)
+        if screenshot.isNull():
+            return None
+
+        restore_dimmed_widgets()
+        dialog = ScreenRegionCaptureDialog(screenshot, screen.geometry())
+        if dialog.exec() != QDialog.Accepted:
+            return None
+
+        selected = dialog.selected_pixmap()
+        if selected.isNull():
+            return None
+
+        capture_dir = config.SHARED_DIR / "screenshot_captures"
+        capture_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        path = capture_dir / f"screenshot_{timestamp}_{time.time_ns() % 1_000_000_000:09d}.png"
+        if not selected.save(str(path), "PNG"):
+            raise RuntimeError("Failed to save screenshot")
+        return str(path)
+    finally:
+        restore_dimmed_widgets()
 
 
 class WaferGridView(QWidget):
@@ -271,13 +419,15 @@ class AddFlakeDialog(QDialog):
         coord_layout = QHBoxLayout()
         coord_layout.addWidget(QLabel("Coord X:"))
         self.coord_x = QDoubleSpinBox()
-        self.coord_x.setRange(-10000, 10000)
+        self.coord_x.setRange(-1e9, 1e9)
+        self.coord_x.setDecimals(4)
         self.coord_x.setSingleStep(0.1)
         coord_layout.addWidget(self.coord_x)
 
         coord_layout.addWidget(QLabel("Coord Y:"))
         self.coord_y = QDoubleSpinBox()
-        self.coord_y.setRange(-10000, 10000)
+        self.coord_y.setRange(-1e9, 1e9)
+        self.coord_y.setDecimals(4)
         self.coord_y.setSingleStep(0.1)
         coord_layout.addWidget(self.coord_y)
         layout.addLayout(coord_layout)
@@ -291,6 +441,10 @@ class AddFlakeDialog(QDialog):
         style.decorate_button(photo_btn, "utility", "folder")
         photo_btn.clicked.connect(self.select_photo)
         photo_layout.addWidget(photo_btn)
+        self.photo_screenshot_btn = QPushButton("Screenshot...")
+        style.decorate_button(self.photo_screenshot_btn, "utility", "photo")
+        self.photo_screenshot_btn.clicked.connect(self.capture_photo)
+        photo_layout.addWidget(self.photo_screenshot_btn)
         layout.addLayout(photo_layout)
 
         # Extra photos
@@ -302,6 +456,10 @@ class AddFlakeDialog(QDialog):
         style.decorate_button(extra_photo_btn, "utility", "photo")
         extra_photo_btn.clicked.connect(self.select_extra_photos)
         extra_photo_layout.addWidget(extra_photo_btn)
+        self.extra_photo_screenshot_btn = QPushButton("Screenshot...")
+        style.decorate_button(self.extra_photo_screenshot_btn, "utility", "photo")
+        self.extra_photo_screenshot_btn.clicked.connect(self.capture_extra_photo)
+        extra_photo_layout.addWidget(self.extra_photo_screenshot_btn)
         layout.addLayout(extra_photo_layout)
 
         # Notes
@@ -330,8 +488,13 @@ class AddFlakeDialog(QDialog):
             self, "Select Photo", "", "Image Files (*.png *.jpg *.jpeg *.tiff)"
         )
         if file_path:
-            self.photo_path = file_path
-            self.photo_label.setText(Path(file_path).name)
+            self._set_photo_path(file_path)
+
+    def capture_photo(self):
+        """Capture a screen region as the flake's main photo."""
+        file_path = capture_screen_region(self)
+        if file_path:
+            self._set_photo_path(file_path)
 
     def select_extra_photos(self):
         """Open file dialog to select extra photos."""
@@ -339,8 +502,28 @@ class AddFlakeDialog(QDialog):
             self, "Select Extra Photos", "", "Image Files (*.png *.jpg *.jpeg *.tiff)"
         )
         if file_paths:
-            self.extra_photo_paths = file_paths
-            self.extra_photo_label.setText(f"{len(file_paths)} selected")
+            self._append_extra_photo_paths(file_paths)
+
+    def capture_extra_photo(self):
+        """Capture a screen region and append it to the extra photos."""
+        file_path = capture_screen_region(self)
+        if file_path:
+            self._append_extra_photo_paths([file_path])
+
+    def _set_photo_path(self, file_path: str):
+        self.photo_path = file_path
+        self.photo_label.setText(Path(file_path).name)
+
+    def _append_extra_photo_paths(self, file_paths: list[str]):
+        self.extra_photo_paths.extend(file_paths)
+        self._update_extra_photo_label()
+
+    def _update_extra_photo_label(self):
+        count = len(self.extra_photo_paths)
+        if count:
+            self.extra_photo_label.setText(f"{count} selected")
+        else:
+            self.extra_photo_label.setText("No extra photos selected")
 
     def get_data(self) -> dict:
         """Return entered flake data."""
@@ -424,10 +607,16 @@ class RefPointSlot(QWidget):
         self._update_thumb()
         outer.addWidget(self.thumb)
 
+        photo_btn_layout = QHBoxLayout()
         photo_btn = QPushButton("Set Photo…")
         style.decorate_button(photo_btn, "utility", "photo")
         photo_btn.clicked.connect(self._pick_photo)
-        outer.addWidget(photo_btn)
+        photo_btn_layout.addWidget(photo_btn)
+        self.screenshot_btn = QPushButton("Screenshot...")
+        style.decorate_button(self.screenshot_btn, "utility", "photo")
+        self.screenshot_btn.clicked.connect(self._capture_photo)
+        photo_btn_layout.addWidget(self.screenshot_btn)
+        outer.addLayout(photo_btn_layout)
 
         clear_btn = QPushButton("Clear Slot")
         style.decorate_button(clear_btn, "danger", "delete")
@@ -474,8 +663,16 @@ class RefPointSlot(QWidget):
             self, "Select Reference Photo", "",
             "Images (*.png *.jpg *.jpeg *.tiff *.bmp)")
         if path:
-            self._photo_path = path
-            self._update_thumb()
+            self._set_photo_path(path)
+
+    def _capture_photo(self):
+        path = capture_screen_region(self)
+        if path:
+            self._set_photo_path(path)
+
+    def _set_photo_path(self, path: str):
+        self._photo_path = path
+        self._update_thumb()
 
     def _clear(self):
         self._photo_path = ''
