@@ -6,6 +6,12 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QTabWidget,
     QMessageBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QLabel,
+    QLineEdit,
+    QVBoxLayout,
 )
 from PySide6.QtCore import Qt
 
@@ -14,6 +20,36 @@ from . import database as db
 from . import style
 from .wafer_widget import WaferWidget
 from .project_widget import ProjectWidget
+
+
+class PreferencesDialog(QDialog):
+    """Application preferences dialog."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Preferences")
+        self.setMinimumWidth(520)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.motion_position_url_input = QLineEdit(config.get_motion_position_url())
+        self.motion_position_url_input.setPlaceholderText(config.DEFAULT_MOTION_POSITION_URL)
+        form.addRow("XY coordinate endpoint:", self.motion_position_url_input)
+        layout.addLayout(form)
+
+        note = QLabel("Used by Auto XY buttons in Add Flake and reference-point editing.")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def accept(self):
+        config.set_motion_position_url(self.motion_position_url_input.text())
+        super().accept()
 
 
 class MainWindow(QMainWindow):
@@ -48,17 +84,23 @@ class MainWindow(QMainWindow):
         menubar = self.menuBar()
 
         # File menu
-        file_menu = menubar.addMenu("File")
+        self.file_menu = menubar.addMenu("File")
 
-        open_db_action = file_menu.addAction(style.symbol_icon("folder"), "Open Database Folder")
+        open_db_action = self.file_menu.addAction(
+            style.symbol_icon("folder"),
+            "Open Database Folder",
+        )
         open_db_action.triggered.connect(self._open_database_folder)
 
-        refresh_action = file_menu.addAction(style.symbol_icon("refresh"), "Refresh All")
+        refresh_action = self.file_menu.addAction(style.symbol_icon("refresh"), "Refresh All")
         refresh_action.triggered.connect(self._refresh_all)
 
-        file_menu.addSeparator()
+        preferences_action = self.file_menu.addAction("Preferences")
+        preferences_action.triggered.connect(self._open_preferences)
 
-        exit_action = file_menu.addAction("Exit")
+        self.file_menu.addSeparator()
+
+        exit_action = self.file_menu.addAction("Exit")
         exit_action.triggered.connect(self.close)
 
         # Help menu
@@ -90,6 +132,11 @@ class MainWindow(QMainWindow):
         if hasattr(self.project_widget, "refresh"):
             self.project_widget.refresh()
         self._update_status_bar()
+
+    def _open_preferences(self):
+        """Open application preferences."""
+        dialog = PreferencesDialog(self)
+        dialog.exec()
 
     def _show_about(self):
         """Show the about dialog."""

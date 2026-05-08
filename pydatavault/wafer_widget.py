@@ -6,6 +6,8 @@ import shutil
 import time
 from pathlib import Path
 from typing import Optional, Dict, List
+from urllib.error import HTTPError, URLError
+from urllib.request import urlopen
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QListWidget, QListWidgetItem,
@@ -26,6 +28,41 @@ from . import style
 
 
 logger = logging.getLogger("PyOmnix")
+
+
+def fetch_motion_xy_position() -> tuple[float, float] | None:
+    """Return external XY coordinates from the local motion GUI, if available."""
+    try:
+        with urlopen(config.get_motion_position_url(), timeout=1) as response:
+            status = getattr(response, "status", None)
+            if status is None:
+                status = response.getcode()
+            if status != 200:
+                return None
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, OSError, TimeoutError, ValueError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+    if "error" in payload:
+        return None
+    try:
+        x = payload["X"]
+        y = payload["Y"]
+    except (KeyError, TypeError):
+        return None
+    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        return None
+    return float(x), float(y)
+
+
+def show_coordinate_unavailable(parent):
+    QMessageBox.warning(
+        parent,
+        "Position Unavailable",
+        "Could not automatically get XY coordinates. Please enter them manually.",
+    )
 
 
 class ScreenRegionCaptureDialog(QDialog):
@@ -430,6 +467,10 @@ class AddFlakeDialog(QDialog):
         self.coord_y.setDecimals(4)
         self.coord_y.setSingleStep(0.1)
         coord_layout.addWidget(self.coord_y)
+        self.auto_coord_btn = QPushButton("Auto XY")
+        style.decorate_button(self.auto_coord_btn, "utility", "target")
+        self.auto_coord_btn.clicked.connect(self.fetch_current_coordinates)
+        coord_layout.addWidget(self.auto_coord_btn)
         layout.addLayout(coord_layout)
 
         # Photo
@@ -524,6 +565,16 @@ class AddFlakeDialog(QDialog):
             self.extra_photo_label.setText(f"{count} selected")
         else:
             self.extra_photo_label.setText("No extra photos selected")
+
+    def fetch_current_coordinates(self):
+        """Fill X/Y from the local motion-control read-only endpoint."""
+        xy = fetch_motion_xy_position()
+        if xy is None:
+            show_coordinate_unavailable(self)
+            return
+        x, y = xy
+        self.coord_x.setValue(x)
+        self.coord_y.setValue(y)
 
     def get_data(self) -> dict:
         """Return entered flake data."""
@@ -644,6 +695,11 @@ class RefPointSlot(QWidget):
         coord_grid2.addWidget(self.y_spin)
         outer.addLayout(coord_grid2)
 
+        self.auto_coord_btn = QPushButton("Auto XY")
+        style.decorate_button(self.auto_coord_btn, "utility", "target")
+        self.auto_coord_btn.clicked.connect(self.fetch_current_coordinates)
+        outer.addWidget(self.auto_coord_btn)
+
         self.setLayout(outer)
 
     # ── internal helpers ────────────────────────────────────────────────
@@ -679,6 +735,16 @@ class RefPointSlot(QWidget):
         self.x_spin.setValue(0.0)
         self.y_spin.setValue(0.0)
         self._update_thumb()
+
+    def fetch_current_coordinates(self):
+        """Fill this slot's X/Y from the local motion-control read-only endpoint."""
+        xy = fetch_motion_xy_position()
+        if xy is None:
+            show_coordinate_unavailable(self)
+            return
+        x, y = xy
+        self.x_spin.setValue(x)
+        self.y_spin.setValue(y)
 
     # ── public API ──────────────────────────────────────────────────────
 

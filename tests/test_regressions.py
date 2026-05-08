@@ -36,6 +36,9 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         self.root_path.mkdir(parents=True, exist_ok=True)
         if self.config.DB_FILE.exists():
             self.config.DB_FILE.unlink()
+        preferences_file = getattr(self.config, "PREFERENCES_FILE", None)
+        if preferences_file and preferences_file.exists():
+            preferences_file.unlink()
         self.db.init_db()
 
     def test_database_exposes_summary_counts_for_main_window(self):
@@ -114,6 +117,42 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         self.assertIn(
             f"Database location: {self.config.ROOT_PATH}",
             about.call_args.args[2],
+        )
+
+    def test_main_window_file_menu_exposes_preferences_action(self):
+        window = self.main_window.MainWindow()
+        try:
+            action_texts = [action.text() for action in window.file_menu.actions()]
+
+            self.assertIn("Preferences", action_texts)
+        finally:
+            window.close()
+
+    def test_preferences_dialog_saves_motion_position_url(self):
+        dialog = self.main_window.PreferencesDialog()
+        try:
+            dialog.motion_position_url_input.setText("http://127.0.0.1:61235/position")
+            dialog.accept()
+
+            self.assertEqual(
+                self.config.get_motion_position_url(),
+                "http://127.0.0.1:61235/position",
+            )
+        finally:
+            dialog.close()
+
+    def test_motion_position_url_defaults_to_local_endpoint(self):
+        self.assertEqual(
+            self.config.get_motion_position_url(),
+            "http://127.0.0.1:51235/position",
+        )
+
+    def test_motion_position_url_can_be_saved(self):
+        self.config.set_motion_position_url("http://127.0.0.1:61235/position")
+
+        self.assertEqual(
+            self.config.get_motion_position_url(),
+            "http://127.0.0.1:61235/position",
         )
 
     def test_wafer_widget_refresh_reloads_current_selection(self):
@@ -557,6 +596,80 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_fetch_motion_xy_position_reads_localhost_position(self):
+        self.config.set_motion_position_url("http://127.0.0.1:61235/position")
+        response = mock.MagicMock()
+        response.status = 200
+        response.read.return_value = b'{"X":12.3457, "Y":98.7654}'
+        response.__enter__.return_value = response
+
+        with mock.patch.object(
+            self.wafer_widget,
+            "urlopen",
+            return_value=response,
+        ) as urlopen:
+            xy = self.wafer_widget.fetch_motion_xy_position()
+
+        urlopen.assert_called_once_with(
+            "http://127.0.0.1:61235/position",
+            timeout=1,
+        )
+        self.assertEqual(xy, (12.3457, 98.7654))
+
+    def test_fetch_motion_xy_position_treats_unavailable_as_none(self):
+        http_error = self.wafer_widget.HTTPError(
+            "http://127.0.0.1:51235/position",
+            503,
+            "not connected",
+            {},
+            None,
+        )
+
+        with mock.patch.object(
+            self.wafer_widget,
+            "urlopen",
+            side_effect=http_error,
+        ):
+            self.assertIsNone(self.wafer_widget.fetch_motion_xy_position())
+
+    def test_add_flake_dialog_auto_coordinate_button_fills_xy(self):
+        dialog = self.wafer_widget.AddFlakeDialog(1)
+        try:
+            with mock.patch.object(
+                self.wafer_widget,
+                "fetch_motion_xy_position",
+                return_value=(12.3457, 98.7654),
+            ):
+                dialog.fetch_current_coordinates()
+
+            self.assertAlmostEqual(dialog.coord_x.value(), 12.3457, places=4)
+            self.assertAlmostEqual(dialog.coord_y.value(), 98.7654, places=4)
+        finally:
+            dialog.close()
+
+    def test_add_flake_dialog_auto_coordinate_failure_keeps_existing_values(self):
+        dialog = self.wafer_widget.AddFlakeDialog(1)
+        try:
+            dialog.coord_x.setValue(11.0)
+            dialog.coord_y.setValue(22.0)
+
+            with mock.patch.object(
+                self.wafer_widget,
+                "fetch_motion_xy_position",
+                return_value=None,
+            ), mock.patch.object(
+                self.wafer_widget.QMessageBox,
+                "warning",
+            ) as warning:
+                dialog.fetch_current_coordinates()
+
+            self.assertEqual(dialog.coord_x.value(), 11.0)
+            self.assertEqual(dialog.coord_y.value(), 22.0)
+            warning.assert_called_once()
+            self.assertIn("manually", warning.call_args.args[2])
+        finally:
+            dialog.close()
+
     def test_add_flake_dialog_collects_extra_photo_paths(self):
         dialog = self.wafer_widget.AddFlakeDialog(1)
         try:
@@ -708,6 +821,45 @@ class PyDataVaultRegressionTests(unittest.TestCase):
                 slot._capture_photo()
 
             self.assertEqual(slot._photo_path, "second-ref.png")
+        finally:
+            slot.close()
+
+    def test_ref_point_slot_auto_coordinate_button_fills_only_that_slot(self):
+        slot_a = self.wafer_widget.RefPointSlot(0, {"photo_path": "a.png", "x": 1, "y": 2})
+        slot_b = self.wafer_widget.RefPointSlot(1, {"photo_path": "b.png", "x": 3, "y": 4})
+        try:
+            with mock.patch.object(
+                self.wafer_widget,
+                "fetch_motion_xy_position",
+                return_value=(7.1234, 8.5678),
+            ):
+                slot_a.fetch_current_coordinates()
+
+            self.assertAlmostEqual(slot_a.x_spin.value(), 7.1234, places=4)
+            self.assertAlmostEqual(slot_a.y_spin.value(), 8.5678, places=4)
+            self.assertEqual(slot_b.x_spin.value(), 3.0)
+            self.assertEqual(slot_b.y_spin.value(), 4.0)
+        finally:
+            slot_a.close()
+            slot_b.close()
+
+    def test_ref_point_slot_auto_coordinate_failure_keeps_existing_values(self):
+        slot = self.wafer_widget.RefPointSlot(0, {"photo_path": "old.png", "x": 1, "y": 2})
+        try:
+            with mock.patch.object(
+                self.wafer_widget,
+                "fetch_motion_xy_position",
+                return_value=None,
+            ), mock.patch.object(
+                self.wafer_widget.QMessageBox,
+                "warning",
+            ) as warning:
+                slot.fetch_current_coordinates()
+
+            self.assertEqual(slot.x_spin.value(), 1.0)
+            self.assertEqual(slot.y_spin.value(), 2.0)
+            warning.assert_called_once()
+            self.assertIn("manually", warning.call_args.args[2])
         finally:
             slot.close()
 

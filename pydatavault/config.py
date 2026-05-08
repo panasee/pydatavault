@@ -1,5 +1,6 @@
 """Configuration and path management for PyDataVault."""
 
+import json
 import os
 from pathlib import Path
 
@@ -47,9 +48,46 @@ SHARED_DIR = ROOT_PATH / "shared"
 FLAKES_DIR = SHARED_DIR / "flakes"
 ARCHIVE_DIR = ROOT_PATH / "archive"
 TEMPLATES_DIR = ROOT_PATH / "templates"
+PREFERENCES_FILE = DB_DIR / "preferences.json"
+DEFAULT_MOTION_POSITION_URL = "http://127.0.0.1:51235/position"
 
 # Resolved at call time so that changes to PYLAB_DB_OUT after import are picked up.
 PYFLEXLAB_OUT_PATH = get_pyflexlab_out_path()
+
+
+def load_preferences() -> dict:
+    """Load user preferences from the current PyDataVault data root."""
+    if not PREFERENCES_FILE.exists():
+        return {}
+    try:
+        payload = json.loads(PREFERENCES_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_preferences(preferences: dict):
+    """Persist user preferences under VAULT_DB_PATH."""
+    DB_DIR.mkdir(parents=True, exist_ok=True)
+    PREFERENCES_FILE.write_text(
+        json.dumps(preferences, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def get_motion_position_url() -> str:
+    """Return the configured read-only motion-control position endpoint."""
+    value = load_preferences().get("motion_position_url")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return DEFAULT_MOTION_POSITION_URL
+
+
+def set_motion_position_url(url: str):
+    """Save the read-only motion-control position endpoint."""
+    preferences = load_preferences()
+    preferences["motion_position_url"] = url.strip() or DEFAULT_MOTION_POSITION_URL
+    save_preferences(preferences)
 
 
 def to_data_path(path: str | Path) -> str:
