@@ -228,19 +228,22 @@ class WaferGridView(QWidget):
     MATERIAL_FONT_SIZE = round(8 * SCALE)
     CELL_RADIUS = round(7 * SCALE)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, show_labels: bool = True):
         super().__init__(parent)
+        self.show_labels = show_labels
         self.rows = 0
         self.cols = 0
         self.flake_counts = {}  # {(row, col): count or {"count": int, "material": str}}
+        self.blocked_cells = set()
         self.selected_cell = None
         self.setMinimumSize(round(300 * self.SCALE), round(300 * self.SCALE))
 
-    def set_grid(self, rows: int, cols: int, flake_counts: Dict):
+    def set_grid(self, rows: int, cols: int, flake_counts: Dict, blocked_cells=None):
         """Update grid dimensions and wafer cell display data."""
         self.rows = rows
         self.cols = cols
         self.flake_counts = flake_counts
+        self.blocked_cells = set(blocked_cells or ())
         self.selected_cell = None
         self.update()
 
@@ -255,8 +258,8 @@ class WaferGridView(QWidget):
             return
 
         left, top, cell_size = self._grid_geometry()
-        label_width = self.LABEL_WIDTH
-        label_height = self.LABEL_HEIGHT
+        label_width = self._label_width()
+        label_height = self._label_height()
 
         x = event.pos().x() - left - label_width
         y = event.pos().y() - top - label_height
@@ -268,6 +271,8 @@ class WaferGridView(QWidget):
         row = y // cell_size
 
         if 0 <= row < self.rows and 0 <= col < self.cols:
+            if (row, col) in self.blocked_cells:
+                return
             self.cell_clicked.emit(row, col)
             self.set_selected_cell(row, col)
 
@@ -283,32 +288,33 @@ class WaferGridView(QWidget):
             return
 
         left, top, cell_size = self._grid_geometry()
-        label_width = self.LABEL_WIDTH
-        label_height = self.LABEL_HEIGHT
+        label_width = self._label_width()
+        label_height = self._label_height()
 
-        label_font = QFont("Segoe UI", self.LABEL_FONT_SIZE)
-        label_font.setBold(True)
-        painter.setFont(label_font)
-        painter.setPen(QPen(QColor("#64748b")))
+        if self.show_labels:
+            label_font = QFont("Segoe UI", self.LABEL_FONT_SIZE)
+            label_font.setBold(True)
+            painter.setFont(label_font)
+            painter.setPen(QPen(QColor("#64748b")))
 
-        # Draw column labels (1, 2, 3, ...)
-        for col in range(self.cols):
-            x = left + label_width + col * cell_size
-            painter.drawText(
-                QRect(x, top, cell_size, label_height),
-                Qt.AlignCenter,
-                str(col + 1)
-            )
+            # Draw column labels (1, 2, 3, ...)
+            for col in range(self.cols):
+                x = left + label_width + col * cell_size
+                painter.drawText(
+                    QRect(x, top, cell_size, label_height),
+                    Qt.AlignCenter,
+                    str(col + 1)
+                )
 
-        # Draw row labels (A, B, C, ...)
-        for row in range(self.rows):
-            y = top + label_height + row * cell_size
-            label = chr(ord('A') + row)
-            painter.drawText(
-                QRect(left, y, label_width, cell_size),
-                Qt.AlignCenter,
-                label
-            )
+            # Draw row labels (A, B, C, ...)
+            for row in range(self.rows):
+                y = top + label_height + row * cell_size
+                label = chr(ord('A') + row)
+                painter.drawText(
+                    QRect(left, y, label_width, cell_size),
+                    Qt.AlignCenter,
+                    label
+                )
 
         # Draw grid cells
         count_font = QFont("Segoe UI", self.COUNT_FONT_SIZE)
@@ -328,7 +334,11 @@ class WaferGridView(QWidget):
 
                 # Determine cell color
                 count, material = self._cell_display_info(row, col)
-                if count == 0:
+                is_blocked = (row, col) in self.blocked_cells
+                if is_blocked:
+                    fill = QColor("#fee2e2")
+                    text_color = QColor("#b91c1c")
+                elif count == 0:
                     fill = QColor("#eef2f7")
                     text_color = QColor("#64748b")
                 elif count == 1:
@@ -388,6 +398,12 @@ class WaferGridView(QWidget):
                     )
                     painter.drawText(material_rect, Qt.AlignCenter, material_text)
 
+    def _label_width(self) -> int:
+        return self.LABEL_WIDTH if self.show_labels else 0
+
+    def _label_height(self) -> int:
+        return self.LABEL_HEIGHT if self.show_labels else 0
+
     def _cell_display_info(self, row: int, col: int) -> tuple[int, str]:
         """Return count/material for a grid cell, accepting old count-only data."""
         value = self.flake_counts.get((row, col), 0)
@@ -397,8 +413,8 @@ class WaferGridView(QWidget):
 
     def _get_cell_size(self) -> int:
         """Calculate cell size based on available space."""
-        label_width = self.LABEL_WIDTH
-        label_height = self.LABEL_HEIGHT
+        label_width = self._label_width()
+        label_height = self._label_height()
         available_width = self.width() - label_width
         available_height = self.height() - label_height
 
@@ -1501,6 +1517,11 @@ class WaferWidget(QWidget):
         edit_wafer_btn.setFixedWidth(92)
         edit_wafer_btn.clicked.connect(self.edit_wafer_metadata)
         wafer_header_row.addWidget(edit_wafer_btn)
+        move_wafer_btn = QPushButton("Move")
+        style.decorate_button(move_wafer_btn, "utility", "transform")
+        move_wafer_btn.setFixedWidth(72)
+        move_wafer_btn.clicked.connect(self.move_wafer)
+        wafer_header_row.addWidget(move_wafer_btn)
         right_layout.addLayout(wafer_header_row)
 
         # Reference points section
@@ -1701,6 +1722,139 @@ class WaferWidget(QWidget):
             self.load_flakes_for_wafer(wafer)
             self.load_ref_points(wafer)
             self.load_grid()
+
+    def move_wafer(self):
+        """Move the selected wafer to an empty position in a target box."""
+        if not self.current_wafer_id:
+            QMessageBox.warning(self, "Error", "Please select a wafer first")
+            return
+
+        wafer = db.get_wafer_by_id(self.current_wafer_id)
+        if wafer is None:
+            QMessageBox.warning(self, "Error", "Selected wafer no longer exists")
+            return
+
+        boxes = db.get_all_boxes()
+        if not boxes:
+            QMessageBox.warning(self, "Error", "No wafer boxes are available")
+            return
+
+        row_label = chr(ord('A') + wafer['row'])
+        col_label = wafer['col'] + 1
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Move Wafer {row_label}{col_label}")
+        dialog.setMinimumWidth(560)
+
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Click an empty grid cell to choose the target position."))
+
+        form = QFormLayout()
+        target_box_combo = QComboBox()
+        for box in boxes:
+            target_box_combo.addItem(
+                f"{box['name']} ({box['rows']}x{box['cols']})",
+                box,
+            )
+        form.addRow("Target Box:", target_box_combo)
+        layout.addLayout(form)
+
+        target_label = QLabel("Target: click a grid cell")
+        target_grid = WaferGridView(show_labels=False)
+        target_grid.setMinimumHeight(round(320 * target_grid.SCALE))
+        layout.addWidget(target_label)
+        layout.addWidget(target_grid, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        move_button = buttons.button(QDialogButtonBox.Ok)
+        move_button.setText("Move")
+        move_button.setEnabled(False)
+
+        target_position = {"row": None, "col": None}
+
+        def format_position(row: int, col: int) -> str:
+            return f"{chr(ord('A') + row)}{col + 1}"
+
+        def update_target_grid(index: int):
+            box = target_box_combo.itemData(index)
+            if not box:
+                return
+            target_position["row"] = None
+            target_position["col"] = None
+            target_label.setText("Target: click a grid cell")
+            move_button.setEnabled(False)
+            target_grid.set_grid(
+                box["rows"],
+                box["cols"],
+                db.get_wafer_grid_summary(box["box_id"]),
+                blocked_cells=db.get_occupied_wafer_positions(box["box_id"]),
+            )
+
+        def on_target_cell_clicked(row: int, col: int):
+            target_position["row"] = row
+            target_position["col"] = col
+            target_label.setText(f"Target: {format_position(row, col)}")
+            move_button.setEnabled(True)
+
+        current_box_index = next(
+            (i for i, box in enumerate(boxes) if box["box_id"] == wafer["box_id"]),
+            0,
+        )
+        target_box_combo.currentIndexChanged.connect(update_target_grid)
+        target_grid.cell_clicked.connect(on_target_cell_clicked)
+        target_box_combo.setCurrentIndex(current_box_index)
+        update_target_grid(current_box_index)
+
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        target_box = target_box_combo.currentData()
+        if not target_box:
+            return
+        if target_position["row"] is None or target_position["col"] is None:
+            return
+
+        try:
+            db.move_wafer(
+                self.current_wafer_id,
+                target_box["box_id"],
+                target_position["row"],
+                target_position["col"],
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Cannot Move Wafer", str(exc))
+            return
+        except Exception as exc:
+            logger.exception("Failed to move wafer")
+            QMessageBox.critical(self, "Database Error", f"Failed to move wafer: {exc}")
+            return
+
+        self.current_box_id = target_box["box_id"]
+        self.load_boxes()
+        self._select_box_in_list(self.current_box_id)
+        self.load_grid()
+        wafer = db.get_wafer_by_id(self.current_wafer_id)
+        if wafer is not None:
+            self.load_flakes_for_wafer(wafer)
+            self.load_ref_points(wafer)
+
+    def _select_box_in_list(self, box_id: int):
+        """Select a box in the list without clearing the current wafer."""
+        signals_blocked = self.box_list.blockSignals(True)
+        try:
+            self.box_list.clearSelection()
+            for row in range(self.box_list.count()):
+                item = self.box_list.item(row)
+                if item.data(Qt.UserRole) == box_id:
+                    self.box_list.setCurrentRow(row)
+                    item.setSelected(True)
+                    return
+        finally:
+            self.box_list.blockSignals(signals_blocked)
 
     def load_flakes_for_wafer(self, wafer: dict):
         """Load flakes for the selected wafer."""

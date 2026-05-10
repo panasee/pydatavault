@@ -11,10 +11,10 @@ from PySide6.QtWidgets import (
     QPushButton, QTableWidget, QTableWidgetItem, QSplitter, QDialog,
     QLabel, QLineEdit, QTextEdit, QComboBox, QSpinBox, QMessageBox,
     QDialogButtonBox, QFormLayout, QHeaderView, QAbstractItemView,
-    QStyledItemDelegate
+    QStyledItemDelegate, QFileDialog, QScrollArea, QGridLayout
 )
-from PySide6.QtCore import Qt, QDate
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, QDate, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QPixmap
 from PySide6.QtCore import QSize
 
 from . import database as db
@@ -38,6 +38,144 @@ class StatusDelegate(QStyledItemDelegate):
 
     def setModelData(self, editor, model, index):
         model.setData(index, editor.currentText(), Qt.EditRole)
+
+
+class DevicePhotoThumbnail(QLabel):
+    """Thumbnail that opens a device assembly photo on double click."""
+
+    def __init__(self, photo_path: str, parent=None):
+        super().__init__(parent)
+        self.photo_path = str(config.resolve_data_path(photo_path))
+        self.setFixedSize(160, 120)
+        self.setAlignment(Qt.AlignCenter)
+        self.setWordWrap(True)
+        self.setToolTip(photo_path)
+
+        pixmap = QPixmap(self.photo_path)
+        if pixmap.isNull():
+            self.setText(Path(photo_path).name)
+        else:
+            self.setPixmap(
+                pixmap.scaled(152, 100, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            )
+
+    def mouseDoubleClickEvent(self, event):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(self.photo_path))
+
+
+class DevicePhotoEditor(QWidget):
+    """Editable note plus thumbnail for one device assembly photo."""
+
+    def __init__(self, entry: dict, remove_callback, parent=None):
+        super().__init__(parent)
+        self.photo_path = entry.get("photo_path", "")
+        self.note_edit = QLineEdit(entry.get("note", ""))
+        self.note_edit.setPlaceholderText("Photo note")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
+        layout.addWidget(self.note_edit)
+        layout.addWidget(DevicePhotoThumbnail(self.photo_path))
+
+        remove_btn = QPushButton("Remove")
+        style.decorate_button(remove_btn, "danger", "delete")
+        remove_btn.clicked.connect(remove_callback)
+        layout.addWidget(remove_btn)
+
+    def get_entry(self) -> dict:
+        return {
+            "photo_path": self.photo_path,
+            "note": self.note_edit.text().strip(),
+        }
+
+
+class DevicePhotosDialog(QDialog):
+    """View and edit device assembly photos and per-photo notes."""
+
+    def __init__(self, entries: list[dict], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Device Photos")
+        self.setMinimumSize(560, 420)
+        self._entries = [dict(entry) for entry in entries]
+        self._photo_widgets: list[DevicePhotoEditor] = []
+
+        layout = QVBoxLayout(self)
+
+        controls = QHBoxLayout()
+        add_btn = QPushButton("Add Photos")
+        style.decorate_button(add_btn, "utility", "photo")
+        add_btn.clicked.connect(self.add_photos)
+        controls.addWidget(add_btn)
+
+        capture_btn = QPushButton("Screenshot")
+        style.decorate_button(capture_btn, "utility", "photo")
+        capture_btn.clicked.connect(self.capture_photo)
+        controls.addWidget(capture_btn)
+        controls.addStretch()
+        layout.addLayout(controls)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.content = QWidget()
+        self.grid = QGridLayout(self.content)
+        self.grid.setSpacing(10)
+        self.scroll.setWidget(self.content)
+        layout.addWidget(self.scroll, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._refresh_grid()
+
+    def add_photos(self):
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select Device Photos", "", "Image Files (*.png *.jpg *.jpeg *.tiff)"
+        )
+        if file_paths:
+            self._entries.extend({"photo_path": path, "note": ""} for path in file_paths)
+            self._refresh_grid()
+
+    def capture_photo(self):
+        from .wafer_widget import capture_screen_region
+
+        file_path = capture_screen_region(self)
+        if file_path:
+            self._entries.append({"photo_path": file_path, "note": ""})
+            self._refresh_grid()
+
+    def _refresh_grid(self):
+        while self.grid.count():
+            item = self.grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        self._photo_widgets = []
+        for index, entry in enumerate(self._entries):
+            editor = DevicePhotoEditor(
+                entry,
+                lambda checked=False, index=index: self._remove_entry(index),
+            )
+            self._photo_widgets.append(editor)
+            self.grid.addWidget(editor, index // 3, index % 3)
+
+    def _remove_entry(self, index: int):
+        self._entries = self.get_photo_entries()
+        if 0 <= index < len(self._entries):
+            del self._entries[index]
+        self._refresh_grid()
+
+    def get_photo_entries(self) -> list[dict]:
+        entries = []
+        widgets = self._photo_widgets or []
+        for widget in widgets:
+            entry = widget.get_entry()
+            if entry["photo_path"]:
+                entries.append(entry)
+        return entries
 
 
 class ProjectWidget(QWidget):
@@ -118,18 +256,19 @@ class ProjectWidget(QWidget):
 
         self.device_table = QTableWidget()
         style.decorate_table(self.device_table)
-        self.device_table.setColumnCount(7)
+        self.device_table.setColumnCount(8)
         self.device_table.setHorizontalHeaderLabels(
-            ["Device ID", "Description", "Fab Date", "Status", "Layers", "Meas Date", "Notes"]
+            ["Device ID", "Description", "Fab Date", "Status", "Layers", "Photos", "Meas Date", "Notes"]
         )
         self.device_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.device_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.device_table.itemChanged.connect(self.on_device_cell_changed)
+        self.device_table.cellDoubleClicked.connect(self.on_device_cell_double_clicked)
 
         header = self.device_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(6, QHeaderView.Stretch)
+        header.setSectionResizeMode(7, QHeaderView.Stretch)
 
         layout.addWidget(self.device_table)
 
@@ -204,7 +343,9 @@ class ProjectWidget(QWidget):
         for row, device in enumerate(devices):
             self.device_table.insertRow(row)
 
-            self.device_table.setItem(row, 0, QTableWidgetItem(device['device_id']))
+            id_item = QTableWidgetItem(device['device_id'])
+            id_item.setData(Qt.UserRole, device['device_id'])
+            self.device_table.setItem(row, 0, id_item)
             self.device_table.setItem(row, 1, QTableWidgetItem(device['description'] or ""))
             self.device_table.setItem(row, 2, QTableWidgetItem(device['fab_date'] or ""))
 
@@ -215,8 +356,24 @@ class ProjectWidget(QWidget):
             layer_count = device.get('layer_count', 0)
             self.device_table.setItem(row, 4, QTableWidgetItem(str(layer_count)))
 
-            self.device_table.setItem(row, 5, QTableWidgetItem(device.get('meas_date') or ""))
-            self.device_table.setItem(row, 6, QTableWidgetItem(device.get('notes') or ""))
+            photo_entries = self._device_photo_entries(device)
+            photo_item = QTableWidgetItem(self._device_photo_summary(photo_entries))
+            photo_item.setFlags(photo_item.flags() & ~Qt.ItemIsEditable)
+            self.device_table.setItem(row, 5, photo_item)
+
+            self.device_table.setItem(row, 6, QTableWidgetItem(device.get('meas_date') or ""))
+            self.device_table.setItem(row, 7, QTableWidgetItem(device.get('notes') or ""))
+
+    def _device_id_for_row(self, row: int) -> str | None:
+        return ProjectWidget._device_id_from_table(self.device_table, row)
+
+    @staticmethod
+    def _device_id_from_table(table, row: int) -> str | None:
+        item = table.item(row, 0)
+        if item is None:
+            return None
+        data = item.data(Qt.UserRole) if hasattr(item, "data") else None
+        return data or item.text()
 
     def on_device_cell_changed(self, item):
         """Save device changes when cell is edited."""
@@ -224,10 +381,57 @@ class ProjectWidget(QWidget):
             return
 
         row = item.row()
-        device_id = self.device_table.item(row, 0).text()
+        device_id = ProjectWidget._device_id_from_table(self.device_table, row)
+        if not device_id:
+            return
 
         col = item.column()
         col_name = self.device_table.horizontalHeaderItem(col).text()
+
+        if col_name == "Device ID":
+            new_device_id = item.text().strip()
+            if not new_device_id:
+                QMessageBox.warning(self, "Validation", "Device ID is required")
+                self.load_devices(self.current_project_id)
+                return
+            if new_device_id == device_id:
+                return
+            if db.get_device(new_device_id) is not None:
+                QMessageBox.warning(
+                    self,
+                    "Validation",
+                    f"Device ID '{new_device_id}' already exists",
+                )
+                self.load_devices(self.current_project_id)
+                return
+            try:
+                self._rename_device_project_artifacts(
+                    self.current_project_id,
+                    device_id,
+                    new_device_id,
+                )
+                db.rename_device(device_id, new_device_id)
+                ProjectWidget.write_used_flakes_index(
+                    self.current_project_id,
+                    new_device_id,
+                    db.get_device_layers(new_device_id),
+                )
+                self.load_devices(self.current_project_id)
+            except OSError as exc:
+                QMessageBox.warning(
+                    self,
+                    "Device Folder Warning",
+                    "The device ID was not updated because the project folders "
+                    f"could not be renamed:\n{exc}",
+                )
+                self.load_devices(self.current_project_id)
+            except ValueError as e:
+                QMessageBox.warning(self, "Validation", str(e))
+                self.load_devices(self.current_project_id)
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to update device ID: {str(e)}")
+                self.load_devices(self.current_project_id)
+            return
 
         col_to_field = {
             "Description": "description",
@@ -246,6 +450,176 @@ class ProjectWidget(QWidget):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to update device: {str(e)}")
                 self.load_devices(self.current_project_id)
+
+    def on_device_cell_double_clicked(self, row: int, col: int):
+        """Open the device photos editor when the Photos column is double-clicked."""
+        if not hasattr(self, 'current_project_id'):
+            return
+        header_item = self.device_table.horizontalHeaderItem(col)
+        if header_item is None or header_item.text() != "Photos":
+            return
+
+        device_id = ProjectWidget._device_id_from_table(self.device_table, row)
+        if not device_id:
+            return
+        device = db.get_device(device_id)
+        if device is None:
+            QMessageBox.warning(self, "Warning", "Selected device no longer exists")
+            self.load_devices(self.current_project_id)
+            return
+
+        entries = self._device_photo_entries(device)
+        dialog = DevicePhotosDialog(entries, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        try:
+            stored_entries = self._copy_device_photo_entries(
+                self.current_project_id,
+                device_id,
+                dialog.get_photo_entries(),
+            )
+            db.update_device(
+                device_id,
+                assembly_photos=json.dumps(stored_entries, ensure_ascii=False),
+            )
+            self.load_devices(self.current_project_id)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to update device photos: {str(e)}")
+
+    @staticmethod
+    def _rename_device_project_artifacts(project_id: str, old_device_id: str, new_device_id: str):
+        old_fab = config.PROJECTS_DIR / project_id / "fabrication" / old_device_id
+        new_fab = config.PROJECTS_DIR / project_id / "fabrication" / new_device_id
+        old_meas_target = config.PYFLEXLAB_OUT_PATH / old_device_id
+        new_meas_target = config.PYFLEXLAB_OUT_PATH / new_device_id
+        old_meas_link = config.PROJECTS_DIR / project_id / "measurements" / old_device_id
+        new_meas_link = config.PROJECTS_DIR / project_id / "measurements" / new_device_id
+
+        for old_path, new_path in (
+            (old_fab, new_fab),
+            (old_meas_target, new_meas_target),
+            (old_meas_link, new_meas_link),
+        ):
+            if (old_path.exists() or old_path.is_symlink()) and (
+                new_path.exists() or new_path.is_symlink()
+            ):
+                raise FileExistsError(f"Target path already exists: {new_path}")
+
+        ProjectWidget._rename_path_if_present(old_fab, new_fab)
+        ProjectWidget._rename_path_if_present(old_meas_target, new_meas_target)
+
+        if old_meas_link.is_symlink():
+            new_meas_link.parent.mkdir(parents=True, exist_ok=True)
+            old_meas_link.unlink()
+            os.symlink(new_meas_target, new_meas_link, target_is_directory=True)
+        else:
+            ProjectWidget._rename_path_if_present(old_meas_link, new_meas_link)
+
+    @staticmethod
+    def _rename_path_if_present(old_path: Path, new_path: Path):
+        if not old_path.exists() and not old_path.is_symlink():
+            return
+        if new_path.exists() or new_path.is_symlink():
+            raise FileExistsError(f"Target path already exists: {new_path}")
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        old_path.rename(new_path)
+
+    def _device_photo_entries(self, device: dict) -> list[dict]:
+        """Return device assembly photo entries stored as JSON."""
+        raw_entries = device.get("assembly_photos")
+        if raw_entries in (None, "", "[]"):
+            return []
+        try:
+            entries = json.loads(raw_entries)
+        except (TypeError, json.JSONDecodeError) as exc:
+            QMessageBox.warning(
+                self,
+                "Device Photos Error",
+                "Stored device photos data is not valid JSON. "
+                f"The device photo list cannot be shown.\n\n{exc}",
+            )
+            return []
+        if not isinstance(entries, list):
+            QMessageBox.warning(
+                self,
+                "Device Photos Error",
+                "Stored device photos data is not a JSON list. "
+                "The device photo list cannot be shown.",
+            )
+            return []
+
+        normalized = []
+        for entry in entries:
+            if isinstance(entry, str):
+                normalized.append({"photo_path": entry, "note": ""})
+            elif isinstance(entry, dict) and entry.get("photo_path"):
+                normalized.append({
+                    "photo_path": entry.get("photo_path", ""),
+                    "note": entry.get("note", ""),
+                })
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Device Photos Error",
+                    "Stored device photos data contains an invalid entry. "
+                    "The device photo list cannot be shown.",
+                )
+                return []
+        return normalized
+
+    @staticmethod
+    def _device_photo_summary(entries: list[dict]) -> str:
+        count = len(entries)
+        if count == 0:
+            return "EMPTY"
+        if count == 1:
+            return "1 photo"
+        return f"{count} photos"
+
+    @staticmethod
+    def _copy_device_photo_entries(
+        project_id: str,
+        device_id: str,
+        entries: list[dict],
+    ) -> list[dict]:
+        photos_dir = config.PROJECTS_DIR / project_id / "fabrication" / device_id / "photos"
+        copied_entries = []
+        for entry in entries:
+            raw_path = entry.get("photo_path", "")
+            if not raw_path:
+                continue
+            source = config.resolve_data_path(raw_path)
+            stored_path = raw_path
+            if source.exists():
+                photos_dir.mkdir(parents=True, exist_ok=True)
+                target_root = photos_dir.resolve()
+                source_resolved = source.resolve()
+                if target_root == source_resolved or target_root in source_resolved.parents:
+                    stored_path = config.to_data_path(source_resolved)
+                else:
+                    stored_path = config.to_data_path(
+                        ProjectWidget._copy_photo_to_dir(source_resolved, photos_dir)
+                    )
+            copied_entries.append({
+                "photo_path": stored_path,
+                "note": entry.get("note", ""),
+            })
+        return copied_entries
+
+    @staticmethod
+    def _copy_photo_to_dir(source_path: Path, target_dir: Path) -> Path:
+        """Copy a photo into target_dir without overwriting an existing file."""
+        target_dir.mkdir(parents=True, exist_ok=True)
+        base = source_path.stem
+        suffix = source_path.suffix
+        dest = target_dir / source_path.name
+        counter = 1
+        while dest.exists():
+            dest = target_dir / f"{base}_{counter}{suffix}"
+            counter += 1
+        shutil.copy2(source_path, dest)
+        return dest
 
     def on_new_project(self):
         """Open new project dialog."""
@@ -315,7 +689,9 @@ class ProjectWidget(QWidget):
             QMessageBox.warning(self, "Warning", "Select a device to edit")
             return
 
-        device_id = self.device_table.item(row, 0).text()
+        device_id = ProjectWidget._device_id_from_table(self.device_table, row)
+        if not device_id:
+            return
         device = db.get_device(device_id)
 
         dialog = EditDeviceDialog(device, self.current_project_id, self)
@@ -329,7 +705,9 @@ class ProjectWidget(QWidget):
             QMessageBox.warning(self, "Warning", "Select a device to delete")
             return
 
-        device_id = self.device_table.item(row, 0).text()
+        device_id = ProjectWidget._device_id_from_table(self.device_table, row)
+        if not device_id:
+            return
         device = db.get_device(device_id)
         device_layers = db.get_device_layers(device_id)
         is_retired = device and device.get("status") == "retired"
@@ -404,7 +782,9 @@ class ProjectWidget(QWidget):
             QMessageBox.warning(self, "Warning", "Select a device")
             return
 
-        device_id = self.device_table.item(row, 0).text()
+        device_id = self._device_id_for_row(row)
+        if not device_id:
+            return
         fab_path = config.PROJECTS_DIR / self.current_project_id / "fabrication" / device_id
 
         if fab_path.exists():
@@ -419,7 +799,9 @@ class ProjectWidget(QWidget):
             QMessageBox.warning(self, "Warning", "Select a device")
             return
 
-        device_id = self.device_table.item(row, 0).text()
+        device_id = self._device_id_for_row(row)
+        if not device_id:
+            return
         meas_path = config.PYFLEXLAB_OUT_PATH / device_id
 
         if meas_path.exists():
@@ -571,6 +953,7 @@ class NewDeviceDialog(QDialog):
         super().__init__(parent)
         self.project_id = project_id
         self.layers = []
+        self.device_photo_entries = []
         self.setWindowTitle("New Device")
         self.setModal(True)
         self.init_ui()
@@ -592,6 +975,20 @@ class NewDeviceDialog(QDialog):
         form_layout.addRow("Fab Date:", self.fab_date_edit)
 
         layout.addLayout(form_layout)
+
+        layout.addWidget(QLabel("Device Photos:"))
+        photo_layout = QHBoxLayout()
+        self.device_photo_label = QLabel("No device photos selected")
+        photo_layout.addWidget(self.device_photo_label)
+        photo_btn = QPushButton("Device Photos...")
+        style.decorate_button(photo_btn, "utility", "photo")
+        photo_btn.clicked.connect(self.edit_device_photos)
+        photo_layout.addWidget(photo_btn)
+        screenshot_btn = QPushButton("Screenshot...")
+        style.decorate_button(screenshot_btn, "utility", "photo")
+        screenshot_btn.clicked.connect(self.capture_device_photo)
+        photo_layout.addWidget(screenshot_btn)
+        layout.addLayout(photo_layout)
 
         layout.addWidget(QLabel("Layers:"))
 
@@ -621,6 +1018,29 @@ class NewDeviceDialog(QDialog):
             layer = dialog.get_layer_data()
             self.layers.append(layer)
             self.refresh_layers_table()
+
+    def edit_device_photos(self):
+        """Open the device photos editor for photos collected before creation."""
+        dialog = DevicePhotosDialog(self.device_photo_entries, self)
+        if dialog.exec() == QDialog.Accepted:
+            self.device_photo_entries = dialog.get_photo_entries()
+            self._update_device_photo_label()
+
+    def capture_device_photo(self):
+        """Capture a screen region and append it to the new device photos."""
+        from .wafer_widget import capture_screen_region
+
+        file_path = capture_screen_region(self)
+        if file_path:
+            self.device_photo_entries.append({"photo_path": file_path, "note": ""})
+            self._update_device_photo_label()
+
+    def _update_device_photo_label(self):
+        count = len(self.device_photo_entries)
+        if count:
+            self.device_photo_label.setText(f"{count} selected")
+        else:
+            self.device_photo_label.setText("No device photos selected")
 
     def refresh_layers_table(self):
         """Refresh the layers table display."""
@@ -656,6 +1076,11 @@ class NewDeviceDialog(QDialog):
                 raise RuntimeError(f"Failed to initialise measurement folder via pyflexlab: {e}")
 
             fab_dir.mkdir(parents=True, exist_ok=True)
+            assembly_photos = ProjectWidget._copy_device_photo_entries(
+                self.project_id,
+                device_id,
+                self.device_photo_entries,
+            )
 
             db.create_device_with_layers(
                 device_id,
@@ -666,7 +1091,8 @@ class NewDeviceDialog(QDialog):
                 status="planned",
                 fab_path=fab_path,
                 meas_path=str(meas_target),
-                notes=""
+                notes="",
+                assembly_photos=json.dumps(assembly_photos, ensure_ascii=False),
             )
             ProjectWidget.write_used_flakes_index(self.project_id, device_id, self.layers)
 

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QLabel,
     QLineEdit,
@@ -18,6 +19,7 @@ from PySide6.QtCore import Qt
 from . import config
 from . import database as db
 from . import style
+from .backup import create_backup
 from .wafer_widget import WaferWidget
 from .project_widget import ProjectWidget
 
@@ -95,6 +97,9 @@ class MainWindow(QMainWindow):
         refresh_action = self.file_menu.addAction(style.symbol_icon("refresh"), "Refresh All")
         refresh_action.triggered.connect(self._refresh_all)
 
+        backup_action = self.file_menu.addAction("Backup...")
+        backup_action.triggered.connect(self._backup_data)
+
         preferences_action = self.file_menu.addAction("Preferences")
         preferences_action.triggered.connect(self._open_preferences)
 
@@ -132,6 +137,26 @@ class MainWindow(QMainWindow):
         if hasattr(self.project_widget, "refresh"):
             self.project_widget.refresh()
         self._update_status_bar()
+
+    def _backup_data(self):
+        """Create a compressed backup after the user chooses a destination."""
+        destination = QFileDialog.getExistingDirectory(
+            self,
+            "Select Backup Destination",
+            str(config.ROOT_PATH.parent),
+        )
+        if not destination:
+            return
+        try:
+            archive_path = create_backup(destination)
+        except Exception as e:
+            QMessageBox.critical(self, "Backup Failed", f"Failed to create backup:\n{e}")
+            return
+        QMessageBox.information(
+            self,
+            "Backup Complete",
+            f"Backup created:\n{archive_path}",
+        )
 
     def _open_preferences(self):
         """Open application preferences."""

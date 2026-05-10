@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS devices (
     meas_path   TEXT DEFAULT '',
     meas_date   TEXT DEFAULT '',
     meas_notes  TEXT DEFAULT '',
+    assembly_photos TEXT DEFAULT '[]',
     notes       TEXT DEFAULT '',
     created_at  TEXT DEFAULT (datetime('now','localtime'))
 );
@@ -132,6 +133,10 @@ def _migrate():
             row["name"]: row
             for row in conn.execute("PRAGMA table_info(device_layers)").fetchall()
         }
+        device_columns = {
+            row["name"]: row
+            for row in conn.execute("PRAGMA table_info(devices)").fetchall()
+        }
         fk_rows = conn.execute("PRAGMA foreign_key_list(flakes)").fetchall()
         wafer_fk = next(
             (row for row in fk_rows if row.get("from") == "wafer_id"),
@@ -146,6 +151,8 @@ def _migrate():
         if "extra_photos" not in flake_columns:
             conn.execute("ALTER TABLE flakes ADD COLUMN extra_photos TEXT DEFAULT '[]'")
             flake_columns["extra_photos"] = {"name": "extra_photos"}
+        if "assembly_photos" not in device_columns:
+            conn.execute("ALTER TABLE devices ADD COLUMN assembly_photos TEXT DEFAULT '[]'")
 
         if needs_flake_uid or needs_layer_uid or needs_wafer_policy:
             _rebuild_flake_schema(conn, flake_columns, layer_columns)
@@ -331,6 +338,65 @@ def _normalize_ref_points(raw_points: str) -> str:
     return json.dumps(changed_points, ensure_ascii=False)
 
 
+def _normalize_assembly_photos(raw_entries: str) -> str:
+    if raw_entries in (None, "", "[]"):
+        return raw_entries
+    try:
+        entries = json.loads(raw_entries)
+    except (TypeError, json.JSONDecodeError):
+        return raw_entries
+    if not isinstance(entries, list):
+        return raw_entries
+    normalized = []
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("photo_path"):
+            entry = dict(entry)
+            entry["photo_path"] = _relative_data_path_or_original(entry["photo_path"])
+        normalized.append(entry)
+    return json.dumps(normalized, ensure_ascii=False)
+
+
+def _rename_managed_assembly_photo_paths(
+    raw_entries: str,
+    old_root: Path,
+    new_root: Path,
+) -> str:
+    if raw_entries in (None, "", "[]"):
+        return raw_entries
+    try:
+        entries = json.loads(raw_entries)
+    except (TypeError, json.JSONDecodeError):
+        return raw_entries
+    if not isinstance(entries, list):
+        return raw_entries
+
+    old_root = old_root.resolve()
+    updated = []
+    for entry in entries:
+        if isinstance(entry, str):
+            updated.append(_rename_managed_path(entry, old_root, new_root))
+        elif isinstance(entry, dict) and entry.get("photo_path"):
+            entry = dict(entry)
+            entry["photo_path"] = _rename_managed_path(
+                entry["photo_path"],
+                old_root,
+                new_root,
+            )
+            updated.append(entry)
+        else:
+            updated.append(entry)
+    return json.dumps(updated, ensure_ascii=False)
+
+
+def _rename_managed_path(path_value: str, old_root: Path, new_root: Path) -> str:
+    resolved = config.resolve_data_path(path_value).resolve()
+    try:
+        relative_path = resolved.relative_to(old_root)
+    except ValueError:
+        return path_value
+    return config.to_data_path(new_root / relative_path)
+
+
 def _normalize_stored_data_paths():
     """Convert PyDataVault-owned stored paths to VAULT_DB_PATH-relative values."""
     with get_conn() as conn:
@@ -356,6 +422,18 @@ def _normalize_stored_data_paths():
                 conn.execute(
                     "UPDATE wafers SET ref_points=? WHERE wafer_id=?",
                     (ref_points, wafer["wafer_id"]),
+                )
+
+        for device in conn.execute(
+            "SELECT device_id, assembly_photos FROM devices"
+        ).fetchall():
+            assembly_photos = _normalize_assembly_photos(
+                device.get("assembly_photos", "[]")
+            )
+            if assembly_photos != device.get("assembly_photos", "[]"):
+                conn.execute(
+                    "UPDATE devices SET assembly_photos=? WHERE device_id=?",
+                    (assembly_photos, device["device_id"]),
                 )
 
 
@@ -420,6 +498,82 @@ def get_wafers_for_box(box_id: int) -> list[dict]:
         return conn.execute(
             "SELECT * FROM wafers WHERE box_id=? ORDER BY row, col",
             (box_id,)).fetchall()
+
+
+def _wafer_has_data(conn, wafer: dict) -> bool:
+    flake_count = conn.execute(
+        "SELECT COUNT(*) as cnt FROM flakes WHERE wafer_id=?",
+        (wafer["wafer_id"],),
+    ).fetchone()
+    if flake_count and flake_count["cnt"]:
+        return True
+    ref_points = (wafer.get("ref_points") or "[]").strip()
+    return any(
+        (wafer.get(field) or "").strip()
+        for field in ("label", "material", "notes")
+    ) or ref_points not in ("", "[]")
+
+
+def get_occupied_wafer_positions(box_id: int) -> set[tuple[int, int]]:
+    """Return positions whose wafer rows contain user data or flakes."""
+    with get_conn() as conn:
+        wafers = conn.execute(
+            "SELECT * FROM wafers WHERE box_id=?",
+            (box_id,),
+        ).fetchall()
+        return {
+            (wafer["row"], wafer["col"])
+            for wafer in wafers
+            if _wafer_has_data(conn, wafer)
+        }
+
+
+def move_wafer(wafer_id: int, target_box_id: int, target_row: int, target_col: int):
+    """Move a wafer to an empty position in another box."""
+    with get_conn() as conn:
+        wafer = conn.execute(
+            "SELECT * FROM wafers WHERE wafer_id=?",
+            (wafer_id,),
+        ).fetchone()
+        if wafer is None:
+            raise ValueError("Selected wafer no longer exists")
+
+        target_box = conn.execute(
+            "SELECT * FROM wafer_boxes WHERE box_id=?",
+            (target_box_id,),
+        ).fetchone()
+        if target_box is None:
+            raise ValueError("Target box no longer exists")
+
+        if target_row < 0 or target_col < 0:
+            raise ValueError("Target position is outside the target box")
+        if target_row >= target_box["rows"] or target_col >= target_box["cols"]:
+            raise ValueError("Target position is outside the target box")
+
+        if (
+            wafer["box_id"] == target_box_id
+            and wafer["row"] == target_row
+            and wafer["col"] == target_col
+        ):
+            raise ValueError("Target position is the wafer's current position")
+
+        existing = conn.execute(
+            """SELECT * FROM wafers
+               WHERE box_id=? AND row=? AND col=?""",
+            (target_box_id, target_row, target_col),
+        ).fetchone()
+        if existing is not None and _wafer_has_data(conn, existing):
+            raise ValueError("Target position already contains a wafer")
+        if existing is not None:
+            conn.execute(
+                "DELETE FROM wafers WHERE wafer_id=?",
+                (existing["wafer_id"],),
+            )
+
+        conn.execute(
+            "UPDATE wafers SET box_id=?, row=?, col=? WHERE wafer_id=?",
+            (target_box_id, target_row, target_col, wafer_id),
+        )
 
 
 def update_wafer(wafer_id: int, **kwargs):
@@ -593,15 +747,15 @@ def delete_project(project_id: str):
 def create_device(device_id: str, project_id: str, description: str = "",
                   fab_date: str = "", status: str = "planned",
                   fab_path: str = "", meas_path: str = "",
-                  notes: str = "") -> str:
+                  notes: str = "", assembly_photos: str = "[]") -> str:
     with get_conn() as conn:
         conn.execute(
             """INSERT INTO devices
                (device_id, project_id, description, fab_date, status,
-                fab_path, meas_path, notes)
-               VALUES (?,?,?,?,?,?,?,?)""",
+                fab_path, meas_path, notes, assembly_photos)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
             (device_id, project_id, description, fab_date, status,
-             fab_path, meas_path, notes))
+             fab_path, meas_path, notes, assembly_photos))
         return device_id
 
 
@@ -612,16 +766,17 @@ def create_device_with_layers(device_id: str, project_id: str,
                               status: str = "planned",
                               fab_path: str = "",
                               meas_path: str = "",
-                              notes: str = "") -> str:
+                              notes: str = "",
+                              assembly_photos: str = "[]") -> str:
     """Create a device and consume its flakes in one transaction."""
     with get_conn() as conn:
         conn.execute(
             """INSERT INTO devices
                (device_id, project_id, description, fab_date, status,
-                fab_path, meas_path, notes)
-               VALUES (?,?,?,?,?,?,?,?)""",
+                fab_path, meas_path, notes, assembly_photos)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
             (device_id, project_id, description, fab_date, status,
-             fab_path, meas_path, notes))
+             fab_path, meas_path, notes, assembly_photos))
         for order_index, layer in enumerate(layers):
             conn.execute(
                 """INSERT INTO device_layers
@@ -663,7 +818,8 @@ def count_devices() -> int:
 
 def update_device(device_id: str, **kwargs):
     allowed = {"project_id", "description", "fab_date", "status",
-               "fab_path", "meas_path", "meas_date", "meas_notes", "notes"}
+               "fab_path", "meas_path", "meas_date", "meas_notes",
+               "assembly_photos", "notes"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return
@@ -671,6 +827,90 @@ def update_device(device_id: str, **kwargs):
     with get_conn() as conn:
         conn.execute(f"UPDATE devices SET {sets} WHERE device_id=?",
                      (*fields.values(), device_id))
+
+
+def rename_device(old_device_id: str, new_device_id: str):
+    """Rename a device primary key and preserve its dependent records."""
+    old_device_id = old_device_id.strip()
+    new_device_id = new_device_id.strip()
+    if not new_device_id:
+        raise ValueError("Device ID is required")
+    if old_device_id == new_device_id:
+        return
+
+    with get_conn() as conn:
+        device = conn.execute(
+            "SELECT * FROM devices WHERE device_id=?",
+            (old_device_id,),
+        ).fetchone()
+        if device is None:
+            raise ValueError("Selected device no longer exists")
+
+        existing = conn.execute(
+            "SELECT device_id FROM devices WHERE device_id=?",
+            (new_device_id,),
+        ).fetchone()
+        if existing is not None:
+            raise ValueError(f"Device ID '{new_device_id}' already exists")
+
+        old_fab_root = (
+            config.PROJECTS_DIR
+            / device["project_id"]
+            / "fabrication"
+            / old_device_id
+        )
+        new_fab_root = (
+            config.PROJECTS_DIR
+            / device["project_id"]
+            / "fabrication"
+            / new_device_id
+        )
+        assembly_photos = _rename_managed_assembly_photo_paths(
+            device.get("assembly_photos", "[]"),
+            old_fab_root,
+            new_fab_root,
+        )
+
+        fab_path = device.get("fab_path") or ""
+        if fab_path:
+            fab_path = config.to_data_path(new_fab_root)
+        meas_path = device.get("meas_path") or ""
+        if meas_path:
+            meas_path = str(config.PYFLEXLAB_OUT_PATH / new_device_id)
+
+        conn.execute(
+            """INSERT INTO devices
+               (device_id, project_id, description, fab_date, status,
+                fab_path, meas_path, meas_date, meas_notes, assembly_photos,
+                notes, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                new_device_id,
+                device["project_id"],
+                device.get("description", ""),
+                device.get("fab_date", ""),
+                device.get("status", "planned"),
+                fab_path,
+                meas_path,
+                device.get("meas_date", ""),
+                device.get("meas_notes", ""),
+                assembly_photos,
+                device.get("notes", ""),
+                device.get("created_at"),
+            ),
+        )
+        conn.execute(
+            "UPDATE device_layers SET device_id=? WHERE device_id=?",
+            (new_device_id, old_device_id),
+        )
+        conn.execute(
+            "UPDATE flakes SET used_in_device=? WHERE used_in_device=?",
+            (new_device_id, old_device_id),
+        )
+        conn.execute(
+            "DELETE FROM devices WHERE device_id=?",
+            (old_device_id,),
+        )
 
 
 def delete_device(device_id: str):

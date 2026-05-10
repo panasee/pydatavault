@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import sys
+import tarfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -76,6 +77,123 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         self.assertEqual(flake_a["wafer_id"], wafer_a["wafer_id"])
         self.assertEqual(flake_b["wafer_id"], wafer_b["wafer_id"])
 
+    def test_move_wafer_to_empty_position_preserves_data_and_clears_source(self):
+        source_box = self.db.create_box("Move Source", rows=2, cols=2)
+        target_box = self.db.create_box("Move Target", rows=2, cols=2)
+        wafer = self.db.get_or_create_wafer(source_box, 0, 0)
+        self.db.update_wafer(
+            wafer["wafer_id"],
+            label="sample",
+            material="Graphene",
+            ref_points='[{"photo_path":"shared/wafer_refs/1/ref.png","x":1,"y":2}]',
+            notes="keep me",
+        )
+        flake_uid = self.db.create_flake(
+            "bf1",
+            wafer["wafer_id"],
+            material="Graphene",
+            photo_path="shared/flakes/1/bf1.png",
+            extra_photos='["shared/flakes/1/extra/a.png"]',
+        )
+
+        self.db.move_wafer(wafer["wafer_id"], target_box, 1, 1)
+
+        moved = self.db.get_wafer_by_id(wafer["wafer_id"])
+        self.assertEqual(moved["box_id"], target_box)
+        self.assertEqual((moved["row"], moved["col"]), (1, 1))
+        self.assertEqual(moved["label"], "sample")
+        self.assertEqual(moved["material"], "Graphene")
+        self.assertEqual(moved["notes"], "keep me")
+        self.assertIn("shared/wafer_refs/1/ref.png", moved["ref_points"])
+        self.assertEqual(self.db.get_flake(flake_uid)["wafer_id"], wafer["wafer_id"])
+
+        self.assertNotIn((0, 0), self.db.get_wafer_grid_summary(source_box))
+        target_summary = self.db.get_wafer_grid_summary(target_box)
+        self.assertEqual(target_summary[(1, 1)]["count"], 1)
+        self.assertEqual(target_summary[(1, 1)]["material"], "Graphene")
+
+    def test_move_wafer_rejects_occupied_target_and_keeps_original_position(self):
+        source_box = self.db.create_box("Occupied Source", rows=2, cols=2)
+        target_box = self.db.create_box("Occupied Target", rows=2, cols=2)
+        wafer = self.db.get_or_create_wafer(source_box, 0, 0)
+        occupied = self.db.get_or_create_wafer(target_box, 1, 1)
+        self.db.update_wafer(occupied["wafer_id"], label="occupied")
+        flake_uid = self.db.create_flake("bf1", wafer["wafer_id"], material="Graphene")
+
+        with self.assertRaisesRegex(ValueError, "already contains"):
+            self.db.move_wafer(wafer["wafer_id"], target_box, 1, 1)
+
+        unchanged = self.db.get_wafer_by_id(wafer["wafer_id"])
+        self.assertEqual(unchanged["box_id"], source_box)
+        self.assertEqual((unchanged["row"], unchanged["col"]), (0, 0))
+        self.assertEqual(self.db.get_flake(flake_uid)["wafer_id"], wafer["wafer_id"])
+        self.assertEqual(
+            self.db.get_wafer_by_id(occupied["wafer_id"])["box_id"],
+            target_box,
+        )
+
+    def test_move_wafer_allows_blank_placeholder_target(self):
+        source_box = self.db.create_box("Placeholder Source", rows=2, cols=2)
+        target_box = self.db.create_box("Placeholder Target", rows=2, cols=2)
+        wafer = self.db.get_or_create_wafer(source_box, 0, 0)
+        placeholder = self.db.get_or_create_wafer(target_box, 1, 1)
+
+        self.db.move_wafer(wafer["wafer_id"], target_box, 1, 1)
+
+        self.assertIsNone(self.db.get_wafer_by_id(placeholder["wafer_id"]))
+        moved = self.db.get_wafer_by_id(wafer["wafer_id"])
+        self.assertEqual(moved["box_id"], target_box)
+        self.assertEqual((moved["row"], moved["col"]), (1, 1))
+
+    def test_occupied_wafer_positions_ignore_blank_placeholders(self):
+        box_id = self.db.create_box("Move Occupancy", rows=2, cols=2)
+        blank = self.db.get_or_create_wafer(box_id, 0, 0)
+        occupied = self.db.get_or_create_wafer(box_id, 1, 1)
+        self.db.update_wafer(occupied["wafer_id"], label="occupied")
+
+        occupied_positions = self.db.get_occupied_wafer_positions(box_id)
+
+        self.assertNotIn((blank["row"], blank["col"]), occupied_positions)
+        self.assertIn((1, 1), occupied_positions)
+
+    def test_move_wafer_allows_target_after_last_flake_is_deleted(self):
+        source_box = self.db.create_box("Deleted Flake Source", rows=2, cols=2)
+        target_box = self.db.create_box("Deleted Flake Target", rows=2, cols=2)
+        wafer = self.db.get_or_create_wafer(source_box, 0, 0)
+        target = self.db.get_or_create_wafer(target_box, 1, 1)
+        flake_uid = self.db.create_flake("deleted", target["wafer_id"], material="Graphene")
+        self.db.delete_flake(flake_uid)
+
+        self.db.move_wafer(wafer["wafer_id"], target_box, 1, 1)
+
+        self.assertIsNone(self.db.get_wafer_by_id(target["wafer_id"]))
+        moved = self.db.get_wafer_by_id(wafer["wafer_id"])
+        self.assertEqual(moved["box_id"], target_box)
+        self.assertEqual((moved["row"], moved["col"]), (1, 1))
+
+    def test_move_wafer_allows_target_after_last_flake_is_used(self):
+        source_box = self.db.create_box("Used Flake Source", rows=2, cols=2)
+        target_box = self.db.create_box("Used Flake Target", rows=2, cols=2)
+        wafer = self.db.get_or_create_wafer(source_box, 0, 0)
+        target = self.db.get_or_create_wafer(target_box, 1, 1)
+        flake_uid = self.db.create_flake("used", target["wafer_id"], material="Graphene")
+        self.db.create_project("proj-used-release", "Project Used Release")
+        self.db.create_device_with_layers(
+            "device-used-release",
+            "proj-used-release",
+            [{"layer_name": "channel", "flake_uid": flake_uid}],
+        )
+
+        self.db.move_wafer(wafer["wafer_id"], target_box, 1, 1)
+
+        self.assertIsNone(self.db.get_wafer_by_id(target["wafer_id"]))
+        moved = self.db.get_wafer_by_id(wafer["wafer_id"])
+        self.assertEqual(moved["box_id"], target_box)
+        self.assertEqual((moved["row"], moved["col"]), (1, 1))
+        used_flake = self.db.get_flake(flake_uid)
+        self.assertEqual(used_flake["status"], "used")
+        self.assertIsNone(used_flake["wafer_id"])
+
     def test_device_layers_reference_internal_flake_uid(self):
         box_id = self.db.create_box("Box Layer Local IDs")
         wafer_a = self.db.get_or_create_wafer(box_id, 0, 0)
@@ -119,14 +237,48 @@ class PyDataVaultRegressionTests(unittest.TestCase):
             about.call_args.args[2],
         )
 
-    def test_main_window_file_menu_exposes_preferences_action(self):
+    def test_main_window_file_menu_exposes_preferences_and_backup_actions(self):
         window = self.main_window.MainWindow()
         try:
             action_texts = [action.text() for action in window.file_menu.actions()]
 
             self.assertIn("Preferences", action_texts)
+            self.assertIn("Backup...", action_texts)
         finally:
             window.close()
+
+    def test_backup_archive_uses_zstd_and_relative_roots(self):
+        backup = importlib.import_module("pydatavault.backup")
+        vault_project_file = self.config.PROJECTS_DIR / "proj" / "fabrication" / "dev" / "note.txt"
+        vault_project_file.parent.mkdir(parents=True, exist_ok=True)
+        vault_project_file.write_text("vault data", encoding="utf-8")
+        self.db.create_project("proj", "Project")
+
+        pyflexlab_out = self.root_path / "pyflexlab-out"
+        measurement_file = pyflexlab_out / "dev" / "measurement.csv"
+        measurement_file.parent.mkdir(parents=True, exist_ok=True)
+        measurement_file.write_text("time,value\n0,1\n", encoding="utf-8")
+
+        destination = self.root_path.parent / f"backups_{uuid4().hex}"
+        destination.mkdir()
+
+        with mock.patch.object(backup.config, "PYFLEXLAB_OUT_PATH", pyflexlab_out):
+            archive_path = backup.create_backup(destination, timestamp="20260511-001500")
+
+        self.assertEqual(archive_path.suffixes[-2:], [".tar", ".zst"])
+
+        import zstandard
+
+        with archive_path.open("rb") as fh:
+            reader = zstandard.ZstdDecompressor().stream_reader(fh)
+            with tarfile.open(fileobj=reader, mode="r|") as tar:
+                names = [member.name for member in tar]
+
+        self.assertIn("manifest.json", names)
+        self.assertIn("vault/.labdb/lab.db", names)
+        self.assertIn("vault/projects/proj/fabrication/dev/note.txt", names)
+        self.assertIn("pyflexlab_out/dev/measurement.csv", names)
+        self.assertFalse(any(str(self.root_path) in name for name in names))
 
     def test_preferences_dialog_saves_motion_position_url(self):
         dialog = self.main_window.PreferencesDialog()
@@ -283,6 +435,48 @@ class PyDataVaultRegressionTests(unittest.TestCase):
             grid.set_grid(1, 1, {(0, 0): {"count": 0, "material": ""}})
 
             self.assertEqual(grid._cell_display_info(0, 0), (0, ""))
+        finally:
+            grid.close()
+
+    def test_wafer_grid_can_hide_coordinate_labels_for_move_dialog(self):
+        grid = self.wafer_widget.WaferGridView(show_labels=False)
+        clicked = []
+
+        class FakeMouseEvent:
+            def pos(self):
+                return self.wafer_widget.QPoint(10, 10)
+
+        try:
+            grid.resize(120, 120)
+            grid.set_grid(2, 2, {})
+            grid.cell_clicked.connect(lambda row, col: clicked.append((row, col)))
+
+            FakeMouseEvent.wafer_widget = self.wafer_widget
+            grid.mousePressEvent(FakeMouseEvent())
+
+            self.assertEqual(clicked, [(0, 0)])
+            self.assertEqual(grid.selected_cell, (0, 0))
+        finally:
+            grid.close()
+
+    def test_wafer_grid_ignores_blocked_move_targets(self):
+        grid = self.wafer_widget.WaferGridView(show_labels=False)
+        clicked = []
+
+        class FakeMouseEvent:
+            def pos(self):
+                return self.wafer_widget.QPoint(10, 10)
+
+        try:
+            grid.resize(120, 120)
+            grid.set_grid(2, 2, {}, blocked_cells={(0, 0)})
+            grid.cell_clicked.connect(lambda row, col: clicked.append((row, col)))
+
+            FakeMouseEvent.wafer_widget = self.wafer_widget
+            grid.mousePressEvent(FakeMouseEvent())
+
+            self.assertEqual(clicked, [])
+            self.assertIsNone(grid.selected_cell)
         finally:
             grid.close()
 
@@ -1364,6 +1558,247 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         self.assertEqual(payload["layers"][0]["flake_uid"], flake_uid)
         self.assertEqual(payload["layers"][0]["flake_id"], "flake-edit")
 
+    def test_create_device_persists_assembly_photos_json(self):
+        self.db.create_project("proj-device-photos", "Project Device Photos")
+        photos = json.dumps([
+            {"photo_path": "projects/proj-device-photos/fabrication/device-photo/photos/a.png",
+             "note": "assembled stack"},
+            {"photo_path": "projects/proj-device-photos/fabrication/device-photo/photos/b.png",
+             "note": ""},
+        ])
+
+        self.db.create_device(
+            "device-photo",
+            "proj-device-photos",
+            assembly_photos=photos,
+        )
+
+        self.assertEqual(
+            self.db.get_device("device-photo")["assembly_photos"],
+            photos,
+        )
+
+    def test_device_photo_column_double_click_updates_device_photos(self):
+        self.db.create_project("proj-photo-edit", "Project Photo Edit")
+        self.db.create_device("device-photo-edit", "proj-photo-edit")
+        source_photo = self.root_path / "device-source.png"
+        source_photo.write_bytes(b"device photo")
+
+        widget = self.project_widget.ProjectWidget()
+
+        class DummyDialog:
+            def __init__(self, entries, parent=None):
+                self.entries = entries
+
+            def exec(self):
+                return self.project_widget.QDialog.Accepted
+
+            def get_photo_entries(self):
+                return [{"photo_path": str(source_photo), "note": "assembly complete"}]
+
+        DummyDialog.project_widget = self.project_widget
+
+        try:
+            widget.current_project_id = "proj-photo-edit"
+            widget.load_devices("proj-photo-edit")
+            headers = [
+                widget.device_table.horizontalHeaderItem(i).text()
+                for i in range(widget.device_table.columnCount())
+            ]
+            photos_col = headers.index("Photos")
+            self.assertEqual(widget.device_table.item(0, photos_col).text(), "EMPTY")
+
+            with mock.patch.object(self.project_widget, "DevicePhotosDialog", DummyDialog):
+                widget.on_device_cell_double_clicked(0, photos_col)
+
+            stored = json.loads(
+                self.db.get_device("device-photo-edit")["assembly_photos"]
+            )
+            self.assertEqual(stored[0]["note"], "assembly complete")
+            copied = self.config.resolve_data_path(stored[0]["photo_path"])
+            self.assertTrue(copied.exists())
+            self.assertEqual(
+                copied.parent,
+                self.config.PROJECTS_DIR
+                / "proj-photo-edit"
+                / "fabrication"
+                / "device-photo-edit"
+                / "photos",
+            )
+            self.assertEqual(widget.device_table.item(0, photos_col).text(), "1 photo")
+        finally:
+            widget.close()
+
+    def test_rename_device_updates_layers_and_used_flakes(self):
+        box_id = self.db.create_box("Box Rename Device")
+        wafer = self.db.get_or_create_wafer(box_id, 0, 0)
+        flake_uid = self.db.create_flake("flake-rename", wafer["wafer_id"], material="hBN")
+        self.db.create_project("proj-rename", "Project Rename")
+        self.db.create_device_with_layers(
+            "device-old",
+            "proj-rename",
+            [{"layer_name": "topbn", "flake_uid": flake_uid}],
+        )
+
+        self.db.rename_device("device-old", "device-new")
+
+        self.assertIsNone(self.db.get_device("device-old"))
+        self.assertIsNotNone(self.db.get_device("device-new"))
+        self.assertEqual(self.db.get_device_layers("device-old"), [])
+        layers = self.db.get_device_layers("device-new")
+        self.assertEqual(len(layers), 1)
+        self.assertEqual(layers[0]["flake_uid"], flake_uid)
+        self.assertEqual(self.db.get_flake(flake_uid)["used_in_device"], "device-new")
+
+    def test_rename_device_updates_managed_assembly_photo_paths(self):
+        self.db.create_project("proj-photo-rename", "Project Photo Rename")
+        photo_dir = (
+            self.config.PROJECTS_DIR
+            / "proj-photo-rename"
+            / "fabrication"
+            / "device-old"
+            / "photos"
+        )
+        photo_dir.mkdir(parents=True, exist_ok=True)
+        photo_path = photo_dir / "assembly.png"
+        photo_path.write_bytes(b"assembly photo")
+        external_photo = self.root_path / "external-assembly.png"
+        external_photo.write_bytes(b"external")
+        self.db.create_device(
+            "device-old",
+            "proj-photo-rename",
+            assembly_photos=json.dumps([
+                {
+                    "photo_path": self.config.to_data_path(photo_path),
+                    "note": "managed",
+                },
+                {
+                    "photo_path": str(external_photo),
+                    "note": "external",
+                },
+            ]),
+        )
+
+        self.db.rename_device("device-old", "device-new")
+
+        stored = json.loads(self.db.get_device("device-new")["assembly_photos"])
+        self.assertEqual(
+            stored[0]["photo_path"],
+            self.config.to_data_path(
+                self.config.PROJECTS_DIR
+                / "proj-photo-rename"
+                / "fabrication"
+                / "device-new"
+                / "photos"
+                / "assembly.png"
+            ),
+        )
+        self.assertEqual(stored[0]["note"], "managed")
+        self.assertEqual(stored[1]["photo_path"], str(external_photo))
+
+    def test_device_id_edit_renames_device_and_photos_use_new_id(self):
+        self.db.create_project("proj-id-edit", "Project ID Edit")
+        self.db.create_device("device-original", "proj-id-edit")
+        source_photo = self.root_path / "device-id-photo.png"
+        source_photo.write_bytes(b"device photo")
+
+        widget = self.project_widget.ProjectWidget()
+
+        class DummyDialog:
+            def __init__(self, entries, parent=None):
+                self.entries = entries
+
+            def exec(self):
+                return self.project_widget.QDialog.Accepted
+
+            def get_photo_entries(self):
+                return [{"photo_path": str(source_photo), "note": "uses stored id"}]
+
+        DummyDialog.project_widget = self.project_widget
+
+        try:
+            widget.current_project_id = "proj-id-edit"
+            widget.load_devices("proj-id-edit")
+            id_item = widget.device_table.item(0, 0)
+            self.assertTrue(id_item.flags() & self.project_widget.Qt.ItemIsEditable)
+
+            id_item.setText("device-renamed")
+            headers = [
+                widget.device_table.horizontalHeaderItem(i).text()
+                for i in range(widget.device_table.columnCount())
+            ]
+            photos_col = headers.index("Photos")
+
+            with mock.patch.object(self.project_widget, "DevicePhotosDialog", DummyDialog):
+                widget.on_device_cell_double_clicked(0, photos_col)
+
+            self.assertIsNone(self.db.get_device("device-original"))
+            renamed = self.db.get_device("device-renamed")
+            self.assertIsNotNone(renamed)
+            stored = json.loads(renamed["assembly_photos"])
+            self.assertEqual(stored[0]["note"], "uses stored id")
+            copied = self.config.resolve_data_path(stored[0]["photo_path"])
+            self.assertEqual(
+                copied.parent,
+                self.config.PROJECTS_DIR
+                / "proj-id-edit"
+                / "fabrication"
+                / "device-renamed"
+                / "photos",
+            )
+        finally:
+            widget.close()
+
+    def test_device_id_edit_keeps_old_id_when_target_folder_blocks_rename(self):
+        self.db.create_project("proj-id-blocked", "Project ID Blocked")
+        old_fab = (
+            self.config.PROJECTS_DIR
+            / "proj-id-blocked"
+            / "fabrication"
+            / "device-old"
+        )
+        new_fab = (
+            self.config.PROJECTS_DIR
+            / "proj-id-blocked"
+            / "fabrication"
+            / "device-new"
+        )
+        old_fab.mkdir(parents=True, exist_ok=True)
+        new_fab.mkdir(parents=True, exist_ok=True)
+        self.db.create_device(
+            "device-old",
+            "proj-id-blocked",
+            fab_path=self.config.to_data_path(old_fab),
+        )
+        widget = self.project_widget.ProjectWidget()
+
+        try:
+            widget.current_project_id = "proj-id-blocked"
+            widget.load_devices("proj-id-blocked")
+            id_item = widget.device_table.item(0, 0)
+
+            with mock.patch.object(self.project_widget.QMessageBox, "warning") as warning:
+                id_item.setText("device-new")
+
+            self.assertIsNotNone(self.db.get_device("device-old"))
+            self.assertIsNone(self.db.get_device("device-new"))
+            self.assertTrue(old_fab.exists())
+            self.assertTrue(new_fab.exists())
+            warning.assert_called()
+        finally:
+            widget.close()
+
+    def test_corrupt_device_photos_json_warns_in_gui(self):
+        widget = self.project_widget.ProjectWidget()
+        try:
+            with mock.patch.object(self.project_widget.QMessageBox, "warning") as warning:
+                entries = widget._device_photo_entries({"assembly_photos": "not json"})
+
+            self.assertEqual(entries, [])
+            warning.assert_called_once()
+        finally:
+            widget.close()
+
     def test_new_device_dialog_rolls_back_database_when_measurement_setup_fails(self):
         self.db.create_project("proj", "Project")
         dialog = self.project_widget.NewDeviceDialog("proj")
@@ -1417,6 +1852,52 @@ class PyDataVaultRegressionTests(unittest.TestCase):
                 "material": "hBN",
             }],
         )
+
+    def test_new_device_dialog_collects_and_saves_device_photos(self):
+        self.db.create_project("proj-new-photo", "Project New Photo")
+        source_photo = self.root_path / "new-device-source.png"
+        source_photo.write_bytes(b"new device photo")
+        dialog = self.project_widget.NewDeviceDialog("proj-new-photo")
+        dialog.device_id_edit.setText("device-new-photo")
+
+        class DummyDialog:
+            def __init__(self, entries, parent=None):
+                self.entries = entries
+
+            def exec(self):
+                return self.project_widget.QDialog.Accepted
+
+            def get_photo_entries(self):
+                return [{"photo_path": str(source_photo), "note": "new assembly"}]
+
+        DummyDialog.project_widget = self.project_widget
+
+        try:
+            with mock.patch.object(self.project_widget, "DevicePhotosDialog", DummyDialog):
+                dialog.edit_device_photos()
+
+            self.assertEqual(dialog.device_photo_label.text(), "1 selected")
+
+            with mock.patch("pyflexlab.file_organizer.FileOrganizer"), \
+                 mock.patch.object(self.project_widget.os, "symlink"):
+                dialog.accept()
+
+            stored = json.loads(
+                self.db.get_device("device-new-photo")["assembly_photos"]
+            )
+            self.assertEqual(stored[0]["note"], "new assembly")
+            copied = self.config.resolve_data_path(stored[0]["photo_path"])
+            self.assertTrue(copied.exists())
+            self.assertEqual(
+                copied.parent,
+                self.config.PROJECTS_DIR
+                / "proj-new-photo"
+                / "fabrication"
+                / "device-new-photo"
+                / "photos",
+            )
+        finally:
+            dialog.close()
 
     def test_delete_device_ignores_fabrication_directory_access_denied(self):
         self.db.create_project("proj-delete", "Project Delete")
