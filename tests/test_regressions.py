@@ -280,6 +280,108 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         self.assertIn("pyflexlab_out/dev/measurement.csv", names)
         self.assertFalse(any(str(self.root_path) in name for name in names))
 
+    def test_device_display_order_persists_in_preferences_without_db_column(self):
+        self.db.create_project("proj-display-order", "Project Display Order")
+        for device_id in ("device-a", "device-b", "device-c"):
+            self.db.create_device(device_id, "proj-display-order")
+
+        widget = self.project_widget.ProjectWidget()
+        try:
+            widget.current_project_id = "proj-display-order"
+            widget.load_devices("proj-display-order")
+
+            widget.move_device_display_row(2, 0)
+
+            self.assertEqual(
+                [
+                    widget.device_table.item(row, 0).data(self.project_widget.Qt.UserRole)
+                    for row in range(widget.device_table.rowCount())
+                ],
+                ["device-c", "device-a", "device-b"],
+            )
+        finally:
+            widget.close()
+
+        preferences = self.config.load_preferences()
+        self.assertEqual(
+            preferences["device_display_order"]["proj-display-order"],
+            ["device-c", "device-a", "device-b"],
+        )
+
+        reloaded = self.project_widget.ProjectWidget()
+        try:
+            reloaded.current_project_id = "proj-display-order"
+            reloaded.load_devices("proj-display-order")
+            self.assertEqual(
+                [
+                    reloaded.device_table.item(row, 0).data(self.project_widget.Qt.UserRole)
+                    for row in range(reloaded.device_table.rowCount())
+                ],
+                ["device-c", "device-a", "device-b"],
+            )
+        finally:
+            reloaded.close()
+
+        with self.db.get_conn() as conn:
+            device_columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(devices)").fetchall()
+            }
+        self.assertNotIn("display_order", device_columns)
+
+    def test_device_display_order_survives_qt_move_action_source_cleanup(self):
+        self.db.create_project("proj-drag-cleanup", "Project Drag Cleanup")
+        for device_id in ("device-a", "device-b", "device-c"):
+            self.db.create_device(device_id, "proj-drag-cleanup")
+
+        widget = self.project_widget.ProjectWidget()
+        try:
+            widget.current_project_id = "proj-drag-cleanup"
+            widget.load_devices("proj-drag-cleanup")
+            widget.device_table.selectRow(2)
+
+            widget.move_device_display_row(2, 0)
+
+            selected_rows = sorted(
+                {index.row() for index in widget.device_table.selectionModel().selectedRows()},
+                reverse=True,
+            )
+            for row in selected_rows:
+                widget.device_table.removeRow(row)
+            self.app.processEvents()
+
+            self.assertEqual(
+                [
+                    widget.device_table.item(row, 0).data(self.project_widget.Qt.UserRole)
+                    for row in range(widget.device_table.rowCount())
+                ],
+                ["device-c", "device-a", "device-b"],
+            )
+        finally:
+            widget.close()
+
+    def test_device_display_order_updates_after_device_id_edit(self):
+        self.db.create_project("proj-order-rename", "Project Order Rename")
+        for device_id in ("device-a", "device-b", "device-c"):
+            self.db.create_device(device_id, "proj-order-rename")
+
+        widget = self.project_widget.ProjectWidget()
+        try:
+            widget.current_project_id = "proj-order-rename"
+            widget.load_devices("proj-order-rename")
+            widget.move_device_display_row(2, 0)
+
+            widget.device_table.item(0, 0).setText("device-renamed")
+
+            self.assertEqual(
+                self.config.load_preferences()["device_display_order"]["proj-order-rename"],
+                ["device-renamed", "device-a", "device-b"],
+            )
+            self.assertIsNone(self.db.get_device("device-c"))
+            self.assertIsNotNone(self.db.get_device("device-renamed"))
+        finally:
+            widget.close()
+
     def test_preferences_dialog_saves_motion_position_url(self):
         dialog = self.main_window.PreferencesDialog()
         try:

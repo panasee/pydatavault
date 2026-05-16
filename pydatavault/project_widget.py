@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox, QFormLayout, QHeaderView, QAbstractItemView,
     QStyledItemDelegate, QFileDialog, QScrollArea, QGridLayout
 )
-from PySide6.QtCore import Qt, QDate, QUrl
+from PySide6.QtCore import Qt, QDate, QUrl, Signal, QTimer
 from PySide6.QtGui import QColor, QDesktopServices, QPixmap
 from PySide6.QtCore import QSize
 
@@ -38,6 +38,51 @@ class StatusDelegate(QStyledItemDelegate):
 
     def setModelData(self, editor, model, index):
         model.setData(index, editor.currentText(), Qt.EditRole)
+
+
+class DeviceTableWidget(QTableWidget):
+    """Device table that emits row moves instead of mutating the model directly."""
+
+    rows_reordered = Signal(int, int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.InternalMove)
+        self.setDragDropOverwriteMode(False)
+        self.setDefaultDropAction(Qt.MoveAction)
+        self.setDropIndicatorShown(True)
+
+    def dropEvent(self, event):
+        source_row = self.currentRow()
+        target_row = self._drop_target_row(event)
+        if source_row < 0 or target_row < 0:
+            event.ignore()
+            return
+
+        if target_row > source_row:
+            target_row -= 1
+        if source_row == target_row:
+            event.accept()
+            return
+
+        self.rows_reordered.emit(source_row, target_row)
+        event.accept()
+
+    def _drop_target_row(self, event) -> int:
+        if self.rowCount() == 0:
+            return -1
+        position = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        row = self.rowAt(position.y())
+        if row < 0:
+            return self.rowCount()
+        if self.dropIndicatorPosition() == QAbstractItemView.BelowItem:
+            return row + 1
+        if self.dropIndicatorPosition() == QAbstractItemView.OnViewport:
+            return self.rowCount()
+        return row
 
 
 class DevicePhotoThumbnail(QLabel):
@@ -183,6 +228,7 @@ class ProjectWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.current_project_id = None
         self.init_ui()
         self.load_projects()
 
@@ -254,7 +300,7 @@ class ProjectWidget(QWidget):
         style.decorate_heading(self.project_header)
         layout.addWidget(self.project_header)
 
-        self.device_table = QTableWidget()
+        self.device_table = DeviceTableWidget()
         style.decorate_table(self.device_table)
         self.device_table.setColumnCount(8)
         self.device_table.setHorizontalHeaderLabels(
@@ -264,6 +310,7 @@ class ProjectWidget(QWidget):
         self.device_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.device_table.itemChanged.connect(self.on_device_cell_changed)
         self.device_table.cellDoubleClicked.connect(self.on_device_cell_double_clicked)
+        self.device_table.rows_reordered.connect(self.move_device_display_row)
 
         header = self.device_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
@@ -336,33 +383,118 @@ class ProjectWidget(QWidget):
 
     def load_devices(self, project_id):
         """Load devices for the selected project."""
-        self.device_table.setRowCount(0)
+        signals_blocked = self.device_table.blockSignals(True)
+        try:
+            self.device_table.setRowCount(0)
 
-        devices = db.get_project_device_summary(project_id)
+            devices = self._apply_device_display_order(
+                project_id,
+                db.get_project_device_summary(project_id),
+            )
 
-        for row, device in enumerate(devices):
-            self.device_table.insertRow(row)
+            for row, device in enumerate(devices):
+                self.device_table.insertRow(row)
 
-            id_item = QTableWidgetItem(device['device_id'])
-            id_item.setData(Qt.UserRole, device['device_id'])
-            self.device_table.setItem(row, 0, id_item)
-            self.device_table.setItem(row, 1, QTableWidgetItem(device['description'] or ""))
-            self.device_table.setItem(row, 2, QTableWidgetItem(device['fab_date'] or ""))
+                id_item = QTableWidgetItem(device['device_id'])
+                id_item.setData(Qt.UserRole, device['device_id'])
+                self.device_table.setItem(row, 0, id_item)
+                self.device_table.setItem(row, 1, QTableWidgetItem(device['description'] or ""))
+                self.device_table.setItem(row, 2, QTableWidgetItem(device['fab_date'] or ""))
 
-            status_item = QTableWidgetItem(device['status'] or "planned")
-            style.decorate_status_item(status_item, device['status'])
-            self.device_table.setItem(row, 3, status_item)
+                status_item = QTableWidgetItem(device['status'] or "planned")
+                style.decorate_status_item(status_item, device['status'])
+                self.device_table.setItem(row, 3, status_item)
 
-            layer_count = device.get('layer_count', 0)
-            self.device_table.setItem(row, 4, QTableWidgetItem(str(layer_count)))
+                layer_count = device.get('layer_count', 0)
+                self.device_table.setItem(row, 4, QTableWidgetItem(str(layer_count)))
 
-            photo_entries = self._device_photo_entries(device)
-            photo_item = QTableWidgetItem(self._device_photo_summary(photo_entries))
-            photo_item.setFlags(photo_item.flags() & ~Qt.ItemIsEditable)
-            self.device_table.setItem(row, 5, photo_item)
+                photo_entries = self._device_photo_entries(device)
+                photo_item = QTableWidgetItem(self._device_photo_summary(photo_entries))
+                photo_item.setFlags(photo_item.flags() & ~Qt.ItemIsEditable)
+                self.device_table.setItem(row, 5, photo_item)
 
-            self.device_table.setItem(row, 6, QTableWidgetItem(device.get('meas_date') or ""))
-            self.device_table.setItem(row, 7, QTableWidgetItem(device.get('notes') or ""))
+                self.device_table.setItem(row, 6, QTableWidgetItem(device.get('meas_date') or ""))
+                self.device_table.setItem(row, 7, QTableWidgetItem(device.get('notes') or ""))
+        finally:
+            self.device_table.blockSignals(signals_blocked)
+
+    def _apply_device_display_order(self, project_id: str, devices: list[dict]) -> list[dict]:
+        preferences = config.load_preferences()
+        order_map = preferences.get("device_display_order")
+        if not isinstance(order_map, dict):
+            return devices
+
+        stored_order = order_map.get(project_id)
+        if not isinstance(stored_order, list):
+            return devices
+
+        remaining = {device["device_id"]: device for device in devices}
+        ordered = []
+        for device_id in stored_order:
+            if isinstance(device_id, str) and device_id in remaining:
+                ordered.append(remaining.pop(device_id))
+
+        ordered.extend(device for device in devices if device["device_id"] in remaining)
+        return ordered
+
+    def move_device_display_row(self, source_row: int, target_row: int):
+        """Move one displayed device row and persist only the GUI display order."""
+        if not self.current_project_id:
+            return
+        row_count = self.device_table.rowCount()
+        if source_row < 0 or source_row >= row_count or row_count == 0:
+            return
+
+        target_row = max(0, min(target_row, row_count - 1))
+        if source_row == target_row:
+            return
+
+        order = self._current_device_display_order()
+        moved_device_id = order.pop(source_row)
+        order.insert(target_row, moved_device_id)
+        self._save_device_display_order(self.current_project_id, order)
+        self.load_devices(self.current_project_id)
+        self.device_table.clearSelection()
+        QTimer.singleShot(0, lambda: self._select_device_display_row(moved_device_id))
+
+    def _select_device_display_row(self, device_id: str):
+        for row in range(self.device_table.rowCount()):
+            if ProjectWidget._device_id_from_table(self.device_table, row) == device_id:
+                self.device_table.selectRow(row)
+                return
+
+    def _current_device_display_order(self) -> list[str]:
+        return [
+            ProjectWidget._device_id_from_table(self.device_table, row)
+            for row in range(self.device_table.rowCount())
+            if ProjectWidget._device_id_from_table(self.device_table, row)
+        ]
+
+    @staticmethod
+    def _save_device_display_order(project_id: str, order: list[str]):
+        preferences = config.load_preferences()
+        order_map = preferences.get("device_display_order")
+        if not isinstance(order_map, dict):
+            order_map = {}
+        order_map[project_id] = order
+        preferences["device_display_order"] = order_map
+        config.save_preferences(preferences)
+
+    @staticmethod
+    def _replace_device_in_display_order(project_id: str, old_device_id: str, new_device_id: str):
+        preferences = config.load_preferences()
+        order_map = preferences.get("device_display_order")
+        if not isinstance(order_map, dict):
+            return
+        order = order_map.get(project_id)
+        if not isinstance(order, list) or old_device_id not in order:
+            return
+        order_map[project_id] = [
+            new_device_id if device_id == old_device_id else device_id
+            for device_id in order
+        ]
+        preferences["device_display_order"] = order_map
+        config.save_preferences(preferences)
 
     def _device_id_for_row(self, row: int) -> str | None:
         return ProjectWidget._device_id_from_table(self.device_table, row)
@@ -411,6 +543,11 @@ class ProjectWidget(QWidget):
                     new_device_id,
                 )
                 db.rename_device(device_id, new_device_id)
+                self._replace_device_in_display_order(
+                    self.current_project_id,
+                    device_id,
+                    new_device_id,
+                )
                 ProjectWidget.write_used_flakes_index(
                     self.current_project_id,
                     new_device_id,
