@@ -56,6 +56,10 @@ class DeviceTableWidget(QTableWidget):
         self.setDropIndicatorShown(True)
 
     def dropEvent(self, event):
+        if self.dropIndicatorPosition() == QAbstractItemView.OnItem:
+            event.ignore()
+            return
+
         source_row = self.currentRow()
         target_row = self._drop_target_row(event)
         if source_row < 0 or target_row < 0:

@@ -360,6 +360,47 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         finally:
             widget.close()
 
+    def test_device_table_ignores_drop_on_existing_item(self):
+        from PySide6.QtCore import QPoint
+
+        table = self.project_widget.DeviceTableWidget()
+        emitted_moves = []
+        table.rows_reordered.connect(lambda source, target: emitted_moves.append((source, target)))
+        try:
+            table.setColumnCount(1)
+            for row, device_id in enumerate(("device-a", "device-b")):
+                table.insertRow(row)
+                table.setItem(row, 0, self.project_widget.QTableWidgetItem(device_id))
+            table.selectRow(0)
+
+            class DropOnItemEvent:
+                def __init__(self):
+                    self.accepted = False
+                    self.ignored = False
+
+                def pos(self):
+                    return QPoint(1, table.rowHeight(0) + 1)
+
+                def accept(self):
+                    self.accepted = True
+
+                def ignore(self):
+                    self.ignored = True
+
+            original_drop_indicator_position = table.dropIndicatorPosition
+            table.dropIndicatorPosition = lambda: self.project_widget.QAbstractItemView.OnItem
+            try:
+                event = DropOnItemEvent()
+                table.dropEvent(event)
+            finally:
+                table.dropIndicatorPosition = original_drop_indicator_position
+
+            self.assertTrue(event.ignored)
+            self.assertFalse(event.accepted)
+            self.assertEqual(emitted_moves, [])
+        finally:
+            table.close()
+
     def test_device_display_order_updates_after_device_id_edit(self):
         self.db.create_project("proj-order-rename", "Project Order Rename")
         for device_id in ("device-a", "device-b", "device-c"):
