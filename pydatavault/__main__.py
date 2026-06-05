@@ -1,12 +1,12 @@
 """Entry point for PyDataVault application."""
 
 import sys
-from PySide6.QtWidgets import QApplication
 
 from . import config
 from . import database as db
 from . import style
 from .main_window import MainWindow
+from PySide6.QtWidgets import QApplication
 
 
 def main():
