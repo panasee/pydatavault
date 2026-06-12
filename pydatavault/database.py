@@ -687,7 +687,7 @@ def count_flakes() -> int:
 
 
 def update_flake(flake_uid: int, **kwargs):
-    allowed = {"wafer_id", "material", "thickness", "magnification",
+    allowed = {"flake_id", "wafer_id", "material", "thickness", "magnification",
                "photo_path", "extra_photos", "coord_x", "coord_y", "status",
                "used_in_device", "notes"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}

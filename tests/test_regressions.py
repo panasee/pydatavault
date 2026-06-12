@@ -1066,6 +1066,23 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_add_flake_dialog_allows_removing_selected_photos(self):
+        dialog = self.wafer_widget.AddFlakeDialog(1)
+        try:
+            dialog._set_photo_path("wrong-main.png")
+            dialog._append_extra_photo_paths(["wrong-extra.png", "keep-extra.png"])
+
+            dialog.remove_photo()
+            dialog._remove_extra_photo_path(0)
+
+            data = dialog.get_data()
+            self.assertIsNone(data["photo_path"])
+            self.assertEqual(data["extra_photo_paths"], ["keep-extra.png"])
+            self.assertEqual(dialog.photo_label.text(), "No photo selected")
+            self.assertEqual(dialog.extra_photo_label.text(), "1 selected")
+        finally:
+            dialog.close()
+
     def test_screen_capture_restores_modal_dialog_before_region_selection(self):
         wafer_widget = self.wafer_widget
         test_case = self
@@ -1261,6 +1278,97 @@ class PyDataVaultRegressionTests(unittest.TestCase):
             self.assertEqual(flake["thickness"], "12 nm")
         finally:
             widget.close()
+
+    def test_flake_buttons_replace_delete_with_edit_button(self):
+        widget = self.wafer_widget.WaferWidget()
+        try:
+            button_texts = [
+                button.text()
+                for button in widget.findChildren(self.wafer_widget.QPushButton)
+            ]
+
+            self.assertIn("Edit Flake", button_texts)
+            self.assertNotIn("Delete Flake", button_texts)
+        finally:
+            widget.close()
+
+    def test_edit_flake_updates_existing_row_and_replaces_photos(self):
+        box_id = self.db.create_box("Box Edit Flake")
+        wafer = self.db.get_or_create_wafer(box_id, 0, 0)
+        flake_uid = self.db.create_flake(
+            "bf1",
+            wafer["wafer_id"],
+            material="Graphene",
+            thickness="old",
+            magnification="10x",
+            coord_x=1.0,
+            coord_y=2.0,
+            photo_path="old-main.png",
+            extra_photos=json.dumps(["old-extra.png"]),
+            notes="old notes",
+        )
+        new_extra = self.root_path / "new-extra.png"
+        new_extra.write_bytes(b"new extra")
+        refreshed = []
+
+        class DummyDialog:
+            def __init__(self, wafer_id, parent=None, flake=None):
+                self.wafer_id = wafer_id
+                self.flake = flake
+
+            def exec(self):
+                return self.wafer_widget.QDialog.Accepted
+
+            def get_data(self):
+                return {
+                    "flake_id": "bf1-edited",
+                    "thickness": "12 nm",
+                    "magnification": "50x",
+                    "photo_path": None,
+                    "extra_photo_paths": [str(new_extra)],
+                    "coord_x": 3.5,
+                    "coord_y": 4.5,
+                    "notes": "edited notes",
+                }
+
+        class DummyTable:
+            def currentRow(self):
+                return 0
+
+            def item(self, row, col):
+                item = self.wafer_widget.QTableWidgetItem("bf1")
+                item.setData(self.wafer_widget.Qt.UserRole, flake_uid)
+                return item
+
+        class DummyWidget:
+            current_box_id = box_id
+            current_wafer_id = wafer["wafer_id"]
+            flake_table = DummyTable()
+
+            def load_flakes_for_wafer(self, wafer_dict):
+                refreshed.append(wafer_dict)
+
+            def load_grid(self):
+                refreshed.append("grid")
+
+        DummyDialog.wafer_widget = self.wafer_widget
+        DummyTable.wafer_widget = self.wafer_widget
+        with mock.patch.object(self.wafer_widget, "AddFlakeDialog", DummyDialog):
+            self.wafer_widget.WaferWidget.edit_flake(DummyWidget())
+
+        flake = self.db.get_flake(flake_uid)
+        self.assertEqual(flake["flake_id"], "bf1-edited")
+        self.assertEqual(flake["thickness"], "12 nm")
+        self.assertEqual(flake["magnification"], "50x")
+        self.assertEqual(flake["coord_x"], 3.5)
+        self.assertEqual(flake["coord_y"], 4.5)
+        self.assertEqual(flake["notes"], "edited notes")
+        self.assertEqual(flake["photo_path"], "")
+        extra_photos = json.loads(flake["extra_photos"])
+        self.assertEqual(len(extra_photos), 1)
+        self.assertFalse(Path(extra_photos[0]).is_absolute())
+        self.assertTrue(self.config.resolve_data_path(extra_photos[0]).exists())
+        self.assertEqual(refreshed, [self.db.get_wafer_by_id(wafer["wafer_id"]), "grid"])
 
     def test_view_photo_uses_qt_desktop_services_for_local_file(self):
         box_id = self.db.create_box("Box View Photo")

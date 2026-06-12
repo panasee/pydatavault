@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QPushButton, QTableWidget, QTableWidgetItem, QDialog, QLabel, QLineEdit,
     QSpinBox, QDoubleSpinBox, QTextEdit, QMessageBox, QFileDialog,
     QHeaderView, QComboBox, QSizePolicy, QFormLayout, QDialogButtonBox,
-    QGridLayout, QScrollArea, QApplication
+    QGridLayout, QScrollArea, QApplication, QMenu
 )
 from PySide6.QtCore import Qt, Signal, QSize, QRect, QPoint, QPointF, QRectF, QUrl
 from PySide6.QtGui import (
@@ -441,14 +441,15 @@ class WaferGridView(QWidget):
 
 
 class AddFlakeDialog(QDialog):
-    """Dialog for adding a new flake to a wafer."""
+    """Dialog for adding or editing a flake on a wafer."""
 
-    def __init__(self, wafer_id: str, parent=None):
+    def __init__(self, wafer_id: str, parent=None, flake: dict | None = None):
         super().__init__(parent)
         self.wafer_id = wafer_id
+        self.flake = flake
         self.photo_path = None
         self.extra_photo_paths = []
-        self.setWindowTitle("Add Flake")
+        self.setWindowTitle("Edit Flake" if flake else "Add Flake")
         self.setGeometry(100, 100, 500, 400)
 
         layout = QVBoxLayout()
@@ -502,6 +503,10 @@ class AddFlakeDialog(QDialog):
         style.decorate_button(self.photo_screenshot_btn, "utility", "photo")
         self.photo_screenshot_btn.clicked.connect(self.capture_photo)
         photo_layout.addWidget(self.photo_screenshot_btn)
+        self.photo_remove_btn = QPushButton("Remove Photo")
+        style.decorate_button(self.photo_remove_btn, "danger", "delete")
+        self.photo_remove_btn.clicked.connect(self.remove_photo)
+        photo_layout.addWidget(self.photo_remove_btn)
         layout.addLayout(photo_layout)
 
         # Extra photos
@@ -517,7 +522,14 @@ class AddFlakeDialog(QDialog):
         style.decorate_button(self.extra_photo_screenshot_btn, "utility", "photo")
         self.extra_photo_screenshot_btn.clicked.connect(self.capture_extra_photo)
         extra_photo_layout.addWidget(self.extra_photo_screenshot_btn)
+        remove_extra_photo_btn = QPushButton("Remove Selected")
+        style.decorate_button(remove_extra_photo_btn, "danger", "delete")
+        remove_extra_photo_btn.clicked.connect(self.remove_selected_extra_photo)
+        extra_photo_layout.addWidget(remove_extra_photo_btn)
         layout.addLayout(extra_photo_layout)
+        self.extra_photo_list = QListWidget()
+        self.extra_photo_list.setMaximumHeight(90)
+        layout.addWidget(self.extra_photo_list)
 
         # Notes
         layout.addWidget(QLabel("Notes:"))
@@ -527,7 +539,7 @@ class AddFlakeDialog(QDialog):
 
         # Buttons
         btn_layout = QHBoxLayout()
-        ok_btn = QPushButton("Create")
+        ok_btn = QPushButton("Save" if flake else "Create")
         style.decorate_button(ok_btn, "primary", "plus")
         ok_btn.clicked.connect(self.accept)
         cancel_btn = QPushButton("Cancel")
@@ -538,6 +550,9 @@ class AddFlakeDialog(QDialog):
         layout.addLayout(btn_layout)
 
         self.setLayout(layout)
+        if flake:
+            self._load_flake(flake)
+        self._update_extra_photo_label()
 
     def select_photo(self):
         """Open file dialog to select photo."""
@@ -552,6 +567,11 @@ class AddFlakeDialog(QDialog):
         file_path = capture_screen_region(self)
         if file_path:
             self._set_photo_path(file_path)
+
+    def remove_photo(self):
+        """Clear the selected main photo from the dialog."""
+        self.photo_path = None
+        self.photo_label.setText("No photo selected")
 
     def select_extra_photos(self):
         """Open file dialog to select extra photos."""
@@ -575,12 +595,50 @@ class AddFlakeDialog(QDialog):
         self.extra_photo_paths.extend(file_paths)
         self._update_extra_photo_label()
 
+    def _remove_extra_photo_path(self, index: int):
+        if 0 <= index < len(self.extra_photo_paths):
+            del self.extra_photo_paths[index]
+        self._update_extra_photo_label()
+
+    def remove_selected_extra_photo(self):
+        row = self.extra_photo_list.currentRow()
+        if row >= 0:
+            self._remove_extra_photo_path(row)
+
     def _update_extra_photo_label(self):
         count = len(self.extra_photo_paths)
         if count:
             self.extra_photo_label.setText(f"{count} selected")
         else:
             self.extra_photo_label.setText("No extra photos selected")
+        self._refresh_extra_photo_list()
+
+    def _refresh_extra_photo_list(self):
+        self.extra_photo_list.clear()
+        for path in self.extra_photo_paths:
+            item = QListWidgetItem(Path(path).name)
+            item.setData(Qt.UserRole, path)
+            self.extra_photo_list.addItem(item)
+
+    def _load_flake(self, flake: dict):
+        self.flake_id_input.setText(flake.get('flake_id', '') or '')
+        self.thickness_input.setText(flake.get('thickness', '') or '')
+        self.magnification_input.setText(flake.get('magnification', '') or '')
+        self.coord_x.setValue(float(flake.get('coord_x') or 0.0))
+        self.coord_y.setValue(float(flake.get('coord_y') or 0.0))
+        self.notes_input.setPlainText(flake.get('notes', '') or '')
+        if flake.get('photo_path'):
+            self._set_photo_path(flake['photo_path'])
+        self.extra_photo_paths = self._parse_extra_photo_paths(flake.get('extra_photos'))
+
+    @staticmethod
+    def _parse_extra_photo_paths(raw_paths: str | None) -> list[str]:
+        if raw_paths in (None, "", "[]"):
+            return []
+        paths = json.loads(raw_paths)
+        if not isinstance(paths, list):
+            raise ValueError("Stored extra photos data is not a JSON list")
+        return [path for path in paths if path]
 
     def fetch_current_coordinates(self):
         """Fill X/Y from the local motion-control read-only endpoint."""
@@ -1552,6 +1610,8 @@ class WaferWidget(QWidget):
         )
         self.flake_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.flake_table.itemChanged.connect(self.on_flake_cell_changed)
+        self.flake_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.flake_table.customContextMenuRequested.connect(self.show_flake_context_menu)
         right_layout.addWidget(self.flake_table)
 
         # Flake buttons
@@ -1562,10 +1622,10 @@ class WaferWidget(QWidget):
         add_flake_btn.clicked.connect(self.add_flake)
         flake_btn_layout.addWidget(add_flake_btn)
 
-        delete_flake_btn = QPushButton("Delete Flake")
-        style.decorate_button(delete_flake_btn, "danger", "delete")
-        delete_flake_btn.clicked.connect(self.delete_flake)
-        flake_btn_layout.addWidget(delete_flake_btn)
+        edit_flake_btn = QPushButton("Edit Flake")
+        style.decorate_button(edit_flake_btn, "neutral", "edit")
+        edit_flake_btn.clicked.connect(self.edit_flake)
+        flake_btn_layout.addWidget(edit_flake_btn)
 
         view_photo_btn = QPushButton("View Photo")
         style.decorate_button(view_photo_btn, "utility", "photo")
@@ -1997,6 +2057,37 @@ class WaferWidget(QWidget):
         dialog = ExtraPhotosDialog(photo_paths, self)
         dialog.exec()
 
+    def show_flake_context_menu(self, position):
+        """Show row actions for the flake under the cursor."""
+        row = self.flake_table.rowAt(position.y())
+        if row < 0:
+            return
+        self.flake_table.selectRow(row)
+
+        menu = QMenu(self)
+        edit_action = menu.addAction("Edit Flake")
+        view_action = menu.addAction("View Photo")
+
+        extra_paths = []
+        flake_uid = self.flake_table.item(row, 0).data(Qt.UserRole)
+        flake = db.get_flake(flake_uid) if flake_uid is not None else None
+        if flake:
+            extra_paths = self._extra_photo_paths(flake)
+        extra_action = None
+        if extra_paths:
+            extra_action = menu.addAction("Show Extra Photos")
+
+        delete_action = menu.addAction("Delete Flake")
+        selected = menu.exec(self.flake_table.viewport().mapToGlobal(position))
+        if selected == edit_action:
+            self.edit_flake()
+        elif selected == view_action:
+            self.view_photo()
+        elif extra_action is not None and selected == extra_action:
+            self.show_extra_photos(extra_paths)
+        elif selected == delete_action:
+            self.delete_flake()
+
     def add_box(self):
         """Add a new wafer box."""
         dialog = QDialog(self)
@@ -2175,9 +2266,11 @@ class WaferWidget(QWidget):
             if data['photo_path']:
                 try:
                     flake_dir = config.FLAKES_DIR / str(flake_uid)
-                    flake_dir.mkdir(parents=True, exist_ok=True)
-                    dest = WaferWidget._copy_photo_to_dir(data['photo_path'], flake_dir)
-                    db.update_flake(flake_uid, photo_path=config.to_data_path(dest))
+                    stored_path = WaferWidget._store_flake_photo_path(
+                        data['photo_path'],
+                        flake_dir,
+                    )
+                    db.update_flake(flake_uid, photo_path=stored_path)
                 except Exception:
                     db.delete_flake(flake_uid)
                     shutil.rmtree(config.FLAKES_DIR / str(flake_uid), ignore_errors=True)
@@ -2188,9 +2281,8 @@ class WaferWidget(QWidget):
                 try:
                     flake_dir = config.FLAKES_DIR / str(flake_uid)
                     extra_dir = flake_dir / "extra"
-                    extra_dir.mkdir(parents=True, exist_ok=True)
                     copied_paths = [
-                        config.to_data_path(WaferWidget._copy_photo_to_dir(path, extra_dir))
+                        WaferWidget._store_flake_photo_path(path, extra_dir)
                         for path in extra_photo_paths
                     ]
                     db.update_flake(flake_uid, extra_photos=json.dumps(copied_paths))
@@ -2207,6 +2299,67 @@ class WaferWidget(QWidget):
             logger.exception("Failed to add flake")
             QMessageBox.critical(self, "Database Error", f"Failed to add flake: {str(e)}")
 
+    def edit_flake(self):
+        """Edit the selected flake using the same fields as Add Flake."""
+        if not self.current_wafer_id:
+            QMessageBox.warning(self, "Error", "Please select a wafer first")
+            return
+
+        current_row = self.flake_table.currentRow()
+        if current_row < 0:
+            QMessageBox.warning(self, "Error", "Please select a flake to edit")
+            return
+
+        flake_uid = self.flake_table.item(current_row, 0).data(Qt.UserRole)
+        flake = db.get_flake(flake_uid)
+        if flake is None:
+            QMessageBox.warning(self, "Error", "Selected flake was not found")
+            return
+
+        dialog = AddFlakeDialog(self.current_wafer_id, self, flake=flake)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        try:
+            data = dialog.get_data()
+            if not data['flake_id']:
+                QMessageBox.warning(self, "Error", "Flake ID is required")
+                return
+
+            flake_dir = config.FLAKES_DIR / str(flake_uid)
+            photo_path = ""
+            if data['photo_path']:
+                photo_path = WaferWidget._store_flake_photo_path(
+                    data['photo_path'],
+                    flake_dir,
+                )
+
+            extra_dir = flake_dir / "extra"
+            extra_photo_paths = [
+                WaferWidget._store_flake_photo_path(path, extra_dir)
+                for path in (data.get('extra_photo_paths') or [])
+            ]
+
+            db.update_flake(
+                flake_uid,
+                flake_id=data['flake_id'],
+                thickness=data['thickness'],
+                magnification=data['magnification'],
+                photo_path=photo_path,
+                extra_photos=json.dumps(extra_photo_paths),
+                coord_x=data['coord_x'],
+                coord_y=data['coord_y'],
+                notes=data['notes'],
+            )
+
+            wafer = db.get_wafer_by_id(self.current_wafer_id)
+            if wafer is not None:
+                self.load_flakes_for_wafer(wafer)
+            self.load_grid()
+        except Exception as e:
+            logger.exception("Failed to edit flake")
+            QMessageBox.critical(self, "Database Error", f"Failed to edit flake: {str(e)}")
+
     @staticmethod
     def _copy_photo_to_dir(source_path: str, target_dir: Path) -> Path:
         """Copy a photo into target_dir without overwriting an existing file."""
@@ -2221,6 +2374,18 @@ class WaferWidget(QWidget):
                 counter += 1
         shutil.copy2(source, candidate)
         return candidate
+
+    @staticmethod
+    def _store_flake_photo_path(source_path: str, target_dir: Path) -> str:
+        """Return a stored path for a flake photo, copying it when needed."""
+        source = config.resolve_data_path(source_path).resolve()
+        if not source.exists():
+            raise FileNotFoundError(source)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        resolved_target_dir = target_dir.resolve()
+        if source.parent == resolved_target_dir:
+            return config.to_data_path(source)
+        return config.to_data_path(WaferWidget._copy_photo_to_dir(str(source), target_dir))
 
     def delete_flake(self):
         """Delete the selected flake."""
