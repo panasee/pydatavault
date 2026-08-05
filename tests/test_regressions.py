@@ -329,6 +329,34 @@ class PyDataVaultRegressionTests(unittest.TestCase):
             }
         self.assertNotIn("display_order", device_columns)
 
+    def test_open_project_button_opens_selected_project_folder(self):
+        project_id = "proj-open-folder"
+        self.db.create_project(project_id, "Project Open Folder")
+        project_dir = self.config.PROJECTS_DIR / project_id
+        project_dir.mkdir(parents=True)
+
+        widget = self.project_widget.ProjectWidget()
+        try:
+            widget.project_list.setCurrentRow(0)
+
+            self.assertEqual(widget.btn_open_project.text(), "Open Project")
+            button_layout = widget.btn_open_project.parentWidget().layout().itemAt(2).layout()
+            self.assertEqual(
+                button_layout.indexOf(widget.btn_open_project),
+                button_layout.indexOf(widget.btn_edit_project) + 1,
+            )
+            with mock.patch.object(
+                self.project_widget.QDesktopServices,
+                "openUrl",
+                return_value=True,
+            ) as open_url:
+                widget.btn_open_project.click()
+
+            opened_url = open_url.call_args.args[0]
+            self.assertEqual(Path(opened_url.toLocalFile()), project_dir)
+        finally:
+            widget.close()
+
     def test_device_display_order_survives_qt_move_action_source_cleanup(self):
         self.db.create_project("proj-drag-cleanup", "Project Drag Cleanup")
         for device_id in ("device-a", "device-b", "device-c"):

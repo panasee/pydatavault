@@ -283,6 +283,11 @@ class ProjectWidget(QWidget):
         self.btn_edit_project.clicked.connect(self.on_edit_project)
         btn_layout.addWidget(self.btn_edit_project)
 
+        self.btn_open_project = QPushButton("Open Project")
+        style.decorate_button(self.btn_open_project, "utility", "folder")
+        self.btn_open_project.clicked.connect(self.on_open_project)
+        btn_layout.addWidget(self.btn_open_project)
+
         self.btn_delete_project = QPushButton("Delete Project")
         style.decorate_button(self.btn_delete_project, "danger", "delete")
         self.btn_delete_project.clicked.connect(self.on_delete_project)
@@ -782,6 +787,20 @@ class ProjectWidget(QWidget):
         if dialog.exec() == QDialog.Accepted:
             self.load_projects()
             self.on_project_selected()
+
+    def on_open_project(self):
+        """Open the selected project's folder."""
+        item = self.project_list.currentItem()
+        if not item:
+            QMessageBox.warning(self, "Warning", "Select a project")
+            return
+
+        project_id = item.data(Qt.UserRole)
+        project_path = config.PROJECTS_DIR / project_id
+        if project_path.exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(project_path)))
+        else:
+            QMessageBox.warning(self, "Warning", "Project folder does not exist")
 
     def on_delete_project(self):
         """Delete the selected project."""
