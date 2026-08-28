@@ -11,6 +11,7 @@ A PySide6 desktop GUI for managing van der Waals heterostructure fabrication and
 | **Wafer / Flake management** | Visual 5×5 grid per wafer box; multi-flake support per wafer position; per-wafer coordinate reference system (up to 3 reference photos + stage coordinates); built-in coordinate transformation tool |
 | **Project / Device management** | Project-scoped device tracking; automatic fabrication and measurement folder creation on device registration; symlink from project tree to measurement data store; layer-by-layer flake consumption tracking |
 | **pyflexlab integration** | Measurement folders initialised via `pyflexlab.FileOrganizer`, guaranteeing correct folder structure and notebook templates; `OUT_DB_PATH` resolved through pyflexlab's own environment logic |
+| **Flake layer analyzer** | Standalone microscope-image utility under **Tools** with a material selector, persistent material/substrate calibration database, zoom/pan/cropping, and per-photo substrate normalization |
 | **Fully editable records** | Every field (dates, notes, status, coordinates, …) can be modified after the fact without affecting underlying data files |
 | **SQLite backend** | Single `lab.db` file stores all metadata; the file system remains the authoritative store for raw data |
 
@@ -60,7 +61,8 @@ PyDataVault requires the following environment variables to be set before launch
 ```
 $VAULT_DB_PATH/
 ├── .labdb/
-│   └── lab.db                  ← SQLite metadata database
+│   ├── lab.db                  ← SQLite metadata database
+│   └── flake_layer_calibrations.db ← independent optical calibration database
 ├── projects/
 │   └── <project-id>/
 │       ├── fabrication/

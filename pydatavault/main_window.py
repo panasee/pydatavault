@@ -20,6 +20,7 @@ from . import config
 from . import database as db
 from . import style
 from .backup import create_backup
+from .flake_layer_tool import FlakeLayerAnalyzerDialog
 from .wafer_widget import WaferWidget
 from .project_widget import ProjectWidget
 
@@ -108,6 +109,15 @@ class MainWindow(QMainWindow):
         exit_action = self.file_menu.addAction("Exit")
         exit_action.triggered.connect(self.close)
 
+        # Standalone utilities
+        self.tools_menu = menubar.addMenu("Tools")
+
+        flake_layer_action = self.tools_menu.addAction(
+            style.symbol_icon("photo"),
+            "Flake Layer Analyzer...",
+        )
+        flake_layer_action.triggered.connect(self._open_flake_layer_analyzer)
+
         # Help menu
         help_menu = menubar.addMenu("Help")
 
@@ -162,6 +172,16 @@ class MainWindow(QMainWindow):
         """Open application preferences."""
         dialog = PreferencesDialog(self)
         dialog.exec()
+
+    def _open_flake_layer_analyzer(self):
+        """Open the independent microscope-image layer analysis tool."""
+        dialog = getattr(self, "_flake_layer_dialog", None)
+        if dialog is None:
+            dialog = FlakeLayerAnalyzerDialog(self)
+            self._flake_layer_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _show_about(self):
         """Show the about dialog."""

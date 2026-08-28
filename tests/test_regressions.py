@@ -1,5 +1,6 @@
 import importlib
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -24,6 +25,7 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         cls.config = importlib.import_module("pydatavault.config")
         cls.db = importlib.import_module("pydatavault.database")
         cls.main_window = importlib.import_module("pydatavault.main_window")
+        cls.flake_layer_tool = importlib.import_module("pydatavault.flake_layer_tool")
         cls.wafer_widget = importlib.import_module("pydatavault.wafer_widget")
         cls.project_widget = importlib.import_module("pydatavault.project_widget")
         from PySide6.QtWidgets import QApplication
@@ -37,6 +39,9 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         self.root_path.mkdir(parents=True, exist_ok=True)
         if self.config.DB_FILE.exists():
             self.config.DB_FILE.unlink()
+        calibration_db_file = getattr(self.config, "FLAKE_CALIBRATION_DB_FILE", None)
+        if calibration_db_file and calibration_db_file.exists():
+            calibration_db_file.unlink()
         preferences_file = getattr(self.config, "PREFERENCES_FILE", None)
         if preferences_file and preferences_file.exists():
             preferences_file.unlink()
@@ -246,6 +251,331 @@ class PyDataVaultRegressionTests(unittest.TestCase):
             self.assertIn("Backup...", action_texts)
         finally:
             window.close()
+
+    def test_main_window_tools_menu_exposes_flake_layer_analyzer(self):
+        window = self.main_window.MainWindow()
+        try:
+            action_texts = [action.text() for action in window.tools_menu.actions()]
+
+            self.assertIn("Flake Layer Analyzer...", action_texts)
+        finally:
+            window.close()
+
+    def test_flake_layer_contrast_and_nearest_calibration(self):
+        contrast = self.flake_layer_tool.rgb_optical_contrast(
+            (200.0, 160.0, 100.0),
+            (190.0, 144.0, 80.0),
+        )
+        self.assertEqual(contrast, (5.0, 10.0, 20.0))
+
+        entries = [
+            self.flake_layer_tool.CalibrationEntry(1, (4.0, 9.0, 19.0)),
+            self.flake_layer_tool.CalibrationEntry(2, (9.0, 14.0, 24.0)),
+        ]
+        match, distance, margin = self.flake_layer_tool.nearest_calibration(
+            contrast,
+            entries,
+        )
+
+        self.assertEqual(match.layers, 1)
+        self.assertAlmostEqual(distance, math.sqrt(3))
+        self.assertGreater(margin, 0)
+
+    def test_flake_layer_substrate_normalization_removes_channel_gain(self):
+        normalized_a = self.flake_layer_tool.substrate_normalized_rgb(
+            (100.0, 80.0, 50.0),
+            (80.0, 56.0, 45.0),
+        )
+        normalized_b = self.flake_layer_tool.substrate_normalized_rgb(
+            (150.0, 160.0, 200.0),
+            (120.0, 112.0, 180.0),
+        )
+
+        self.assertEqual(normalized_a, (80.0, 70.0, 90.0))
+        self.assertEqual(normalized_b, normalized_a)
+        self.assertIn(
+            "saturation",
+            self.flake_layer_tool.substrate_quality_warning((251.0, 150.0, 120.0)),
+        )
+
+    def test_flake_layer_known_regions_create_layer_centroids(self):
+        sample_type = self.flake_layer_tool.CalibrationSample
+        samples = [
+            sample_type(1, (80.0, 82.0, 84.0), "a.png", (1, 1, 1), (1, 1, 1)),
+            sample_type(1, (82.0, 84.0, 86.0), "b.png", (1, 1, 1), (1, 1, 1)),
+            sample_type(2, (70.0, 72.0, 74.0), "a.png", (1, 1, 1), (1, 1, 1)),
+        ]
+
+        entries = self.flake_layer_tool.calibration_centroids(samples)
+
+        self.assertEqual([entry.layers for entry in entries], [1, 2])
+        self.assertEqual(entries[0].normalized_rgb, (81.0, 83.0, 85.0))
+        self.assertEqual(entries[1].normalized_rgb, (70.0, 72.0, 74.0))
+
+    def test_flake_layer_calibration_database_round_trip_preserves_samples(self):
+        sample = self.flake_layer_tool.CalibrationSample(
+            2,
+            (80.0, 70.0, 90.0),
+            "known.png",
+            (100.0, 80.0, 50.0),
+            (80.0, 56.0, 45.0),
+        )
+
+        store_path = self.root_path / ".labdb" / "calibration-round-trip.db"
+        if store_path.exists():
+            store_path.unlink()
+        store = self.flake_layer_tool.FlakeCalibrationStore(store_path)
+
+        material_id = store.save_calibration(
+            "Graphene",
+            "285 nm SiO2/Si",
+            [sample],
+        )
+        materials = store.list_materials()
+        restored = store.get_samples(material_id)
+
+        self.assertEqual(materials[0]["material_name"], "Graphene")
+        self.assertEqual(materials[0]["substrate"], "285 nm SiO2/Si")
+        self.assertEqual(materials[0]["sample_count"], 1)
+        self.assertEqual(restored, [sample])
+
+        invalid = self.flake_layer_tool.CalibrationSample(
+            2,
+            (81.0, 70.0, 90.0),
+            "known.png",
+            (100.0, 80.0, 50.0),
+            (80.0, 56.0, 45.0),
+        )
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            store.save_calibration(
+                "Graphene",
+                "285 nm SiO2/Si",
+                [invalid],
+                material_id,
+            )
+
+        self.assertEqual(store.get_samples(material_id), [sample])
+
+    def test_flake_layer_analyzer_selects_saved_material_from_dropdown(self):
+        sample = self.flake_layer_tool.CalibrationSample(
+            1,
+            (80.0, 70.0, 90.0),
+            "known.png",
+            (100.0, 80.0, 50.0),
+            (80.0, 56.0, 45.0),
+        )
+        store_path = self.root_path / ".labdb" / "calibration-dropdown.db"
+        if store_path.exists():
+            store_path.unlink()
+        store = self.flake_layer_tool.FlakeCalibrationStore(store_path)
+        material_id = store.save_calibration(
+            "Graphene",
+            "285 nm SiO2/Si",
+            [sample],
+        )
+
+        dialog = self.flake_layer_tool.FlakeLayerAnalyzerDialog(store=store)
+        try:
+            self.assertEqual(dialog.material_combo.count(), 1)
+            self.assertEqual(dialog.material_combo.currentData(), material_id)
+            self.assertEqual(
+                dialog.material_combo.currentText(),
+                "Graphene — 285 nm SiO2/Si",
+            )
+            self.assertEqual(dialog.calibration_samples, [sample])
+            self.assertTrue(dialog.calibration_group.isHidden())
+        finally:
+            dialog.close()
+
+        manager = self.flake_layer_tool.CalibrationDatabaseDialog(store)
+        try:
+            self.assertEqual(manager.material_list.count(), 1)
+            self.assertEqual(
+                manager.material_list.item(0).data(self.flake_layer_tool.Qt.UserRole),
+                material_id,
+            )
+            self.assertEqual(manager.add_material_button.text(), "+")
+        finally:
+            manager.close()
+
+    def test_flake_layer_existing_material_opens_recalibration_editor(self):
+        sample = self.flake_layer_tool.CalibrationSample(
+            2,
+            (80.0, 70.0, 90.0),
+            "known.png",
+            (100.0, 80.0, 50.0),
+            (80.0, 56.0, 45.0),
+        )
+        store_path = self.root_path / ".labdb" / "calibration-editor.db"
+        if store_path.exists():
+            store_path.unlink()
+        store = self.flake_layer_tool.FlakeCalibrationStore(store_path)
+        material_id = store.save_calibration("hBN", "285 nm SiO2/Si", [sample])
+
+        editor = self.flake_layer_tool.FlakeLayerAnalyzerDialog(
+            store=store,
+            calibration_mode=True,
+            material_id=material_id,
+        )
+        try:
+            self.assertEqual(editor.material_input.text(), "hBN")
+            self.assertEqual(editor.substrate_input.text(), "285 nm SiO2/Si")
+            self.assertTrue(editor.material_input.isReadOnly())
+            self.assertTrue(editor.substrate_input.isReadOnly())
+            self.assertEqual(editor.calibration_table.rowCount(), 1)
+            self.assertTrue(editor.result_group.isHidden())
+        finally:
+            editor.close()
+
+    def test_flake_layer_dialog_adds_current_region_without_manual_rgb_entry(self):
+        dialog = self.flake_layer_tool.FlakeLayerAnalyzerDialog()
+        try:
+            dialog.image_path = Path("known-layers.png")
+            dialog.sample_values = {
+                "substrate": (100.0, 80.0, 50.0),
+                "flake": (80.0, 56.0, 45.0),
+            }
+            dialog.sample_points = {"substrate": (1.0, 1.0), "flake": (2.0, 2.0)}
+            dialog.known_layers_spin.setValue(3)
+
+            dialog.add_known_region()
+
+            self.assertEqual(len(dialog.calibration_samples), 1)
+            self.assertEqual(dialog.calibration_samples[0].layers, 3)
+            self.assertEqual(
+                dialog.calibration_samples[0].normalized_rgb,
+                (80.0, 70.0, 90.0),
+            )
+            self.assertEqual(dialog.calibration_table.rowCount(), 1)
+            self.assertNotIn("flake", dialog.sample_values)
+
+            image = self.flake_layer_tool.QImage(
+                10,
+                10,
+                self.flake_layer_tool.QImage.Format_RGB32,
+            )
+            dialog._set_working_image(image, is_cropped=False)
+
+            self.assertEqual(dialog.sample_mode, "substrate")
+            self.assertTrue(dialog.substrate_button.isChecked())
+        finally:
+            dialog.close()
+
+    def test_flake_layer_image_sampling_uses_circular_roi(self):
+        from PySide6.QtGui import QColor, QImage
+
+        image = QImage(5, 5, QImage.Format_RGB32)
+        image.fill(QColor(10, 20, 30))
+        image.setPixelColor(2, 2, QColor(110, 120, 130))
+
+        sampled = self.flake_layer_tool.mean_rgb_in_circle(image, (2, 2), 1)
+
+        self.assertEqual(sampled, (30.0, 40.0, 50.0))
+
+    def test_flake_layer_crop_returns_independent_bounded_image(self):
+        from PySide6.QtCore import QRectF
+        from PySide6.QtGui import QColor, QImage
+
+        image = QImage(10, 8, QImage.Format_RGB32)
+        image.fill(QColor(10, 20, 30))
+        image.setPixelColor(3, 2, QColor(100, 110, 120))
+
+        cropped = self.flake_layer_tool.cropped_image(
+            image,
+            QRectF(3, 2, 4, 3),
+        )
+        cropped.setPixelColor(0, 0, QColor(1, 2, 3))
+
+        self.assertEqual((cropped.width(), cropped.height()), (4, 3))
+        self.assertEqual(image.pixelColor(3, 2), QColor(100, 110, 120))
+
+    def test_flake_layer_view_supports_zoom_and_crop_controls(self):
+        from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
+        from PySide6.QtGui import QWheelEvent
+
+        dialog = self.flake_layer_tool.FlakeLayerAnalyzerDialog()
+        try:
+            self.assertTrue(dialog.crop_button.isCheckable())
+            self.assertFalse(dialog.apply_crop_button.isEnabled())
+
+            dialog.image = self.flake_layer_tool.QImage(
+                20,
+                20,
+                self.flake_layer_tool.QImage.Format_RGB32,
+            )
+            dialog.image_view.set_image(dialog.image)
+            dialog.image_view.resetTransform()
+            zoom_in = QWheelEvent(
+                QPointF(10, 10),
+                QPointF(10, 10),
+                QPoint(),
+                QPoint(0, 120),
+                Qt.NoButton,
+                Qt.NoModifier,
+                Qt.ScrollUpdate,
+                False,
+            )
+            dialog.image_view.wheelEvent(zoom_in)
+
+            self.assertAlmostEqual(dialog.image_view.transform().m11(), 1.25)
+
+            scale_before_resize = dialog.image_view.transform().m11()
+            dialog.image_view.resize(300, 240)
+            self.app.processEvents()
+
+            self.assertAlmostEqual(
+                dialog.image_view.transform().m11(),
+                scale_before_resize,
+            )
+
+            dialog.original_image = dialog.image.copy()
+            dialog.image_view._crop_item = dialog.image_view.scene().addRect(
+                QRectF(2, 3, 8, 6)
+            )
+            dialog.apply_crop()
+
+            self.assertEqual((dialog.image.width(), dialog.image.height()), (8, 6))
+            self.assertTrue(dialog.reset_image_button.isEnabled())
+
+            dialog.reset_original_image()
+
+            self.assertEqual((dialog.image.width(), dialog.image.height()), (20, 20))
+            self.assertFalse(dialog.reset_image_button.isEnabled())
+        finally:
+            dialog.close()
+
+    def test_flake_layer_wheel_zoom_in_survives_scrollbar_resize(self):
+        from PySide6.QtCore import QPoint, QPointF, Qt
+        from PySide6.QtGui import QImage, QWheelEvent
+
+        dialog = self.flake_layer_tool.FlakeLayerAnalyzerDialog()
+        try:
+            dialog.show()
+            self.app.processEvents()
+            image = QImage(1200, 900, QImage.Format_RGB32)
+            dialog.image_view.set_image(image)
+            initial_scale = dialog.image_view.transform().m11()
+
+            for _ in range(6):
+                event = QWheelEvent(
+                    QPointF(100, 100),
+                    QPointF(100, 100),
+                    QPoint(),
+                    QPoint(0, 120),
+                    Qt.NoButton,
+                    Qt.NoModifier,
+                    Qt.ScrollUpdate,
+                    False,
+                )
+                dialog.image_view.wheelEvent(event)
+                self.app.processEvents()
+
+            self.assertAlmostEqual(
+                dialog.image_view.transform().m11(),
+                initial_scale * 1.25 ** 6,
+            )
+        finally:
+            dialog.close()
 
     def test_backup_archive_uses_zstd_and_relative_roots(self):
         backup = importlib.import_module("pydatavault.backup")
@@ -861,6 +1191,63 @@ class PyDataVaultRegressionTests(unittest.TestCase):
             self.assertGreater(left.x(), right.x())
             self.assertEqual(diagram.ref_points[0]["x"], -1.0)
             self.assertEqual(diagram.ref_points[1]["x"], 1.0)
+        finally:
+            diagram.close()
+
+    def test_coordinate_diagram_uses_longest_ref_pair_as_diagonal(self):
+        diagram = self.wafer_widget.WaferDiagramWidget(
+            [
+                {"x": 0.0, "y": 0.0},
+                {"x": 10000.0, "y": 0.0},
+                {"x": 0.0, "y": 10000.0},
+            ],
+            [],
+        )
+        try:
+            self.assertEqual(
+                diagram._para_vertices(),
+                [
+                    (0.0, 0.0),
+                    (10000.0, 0.0),
+                    (10000.0, 10000.0),
+                    (0.0, 10000.0),
+                ],
+            )
+        finally:
+            diagram.close()
+
+    def test_coordinate_diagram_fits_new_coordinate_unit_scale(self):
+        diagram = self.wafer_widget.WaferDiagramWidget(
+            [
+                {"x": 0.0, "y": 0.0},
+                {"x": 10000.0, "y": 0.0},
+                {"x": 0.0, "y": 10000.0},
+            ],
+            [{"flake_id": "Si-point", "coord_x": 4500.0, "coord_y": 6200.0}],
+        )
+        try:
+            diagram.set_new_transform([
+                (0, (100.0, 200.0)),
+                (1, (110.0, 200.0)),
+                (2, (100.0, 190.0)),
+            ])
+            diagram._compute_layout()
+
+            old_span = math.dist(
+                diagram._to_screen(0.0, 0.0).toTuple(),
+                diagram._to_screen(10000.0, 0.0).toTuple(),
+            )
+            new_span = math.dist(
+                diagram._to_screen_new(100.0, 200.0).toTuple(),
+                diagram._to_screen_new(110.0, 200.0).toTuple(),
+            )
+
+            self.assertAlmostEqual(old_span, diagram.TARGET_LONG_EDGE_PX)
+            self.assertAlmostEqual(new_span, diagram.TARGET_LONG_EDGE_PX)
+            self.assertEqual(
+                diagram._to_screen(diagram._cx, diagram._cy),
+                diagram._to_screen_new(*diagram._new_center()),
+            )
         finally:
             diagram.close()
 

@@ -914,7 +914,7 @@ class WaferDiagramWidget(QWidget):
 
     New system (red, solid):  appears after set_new_transform() is called.
       - Same physical points transformed to the new coordinate frame
-      - Plotted in the same screen space as old coords (same px/unit scale)
+      - Independently fitted to the same display span as the old coordinates
       - Solid circles; flakes keep their number labels
 
     Scale is fixed so the longest edge of the (old-coord) parallelogram
@@ -939,6 +939,7 @@ class WaferDiagramWidget(QWidget):
         self._old_flake_sp: list[QPointF] = []
         # layout params (computed in _compute_layout)
         self._scale = 1.0
+        self._new_scale = 1.0
         self._cx = 0.0
         self._cy = 0.0
         self.setMinimumSize(360, 300)
@@ -967,10 +968,9 @@ class WaferDiagramWidget(QWidget):
     def _para_vertices(self) -> list[tuple[float, float]]:
         """Return the 4 parallelogram vertices (old coords) in draw order.
 
-        Given 3 ref points A, B, C, there are 3 candidate 4th vertices.
-        We pick the one that produces the *smallest* parallelogram area,
-        which corresponds to the two shorter sides (not the diagonal)
-        spanning the shape — i.e. the physically correct wafer outline.
+        Given 3 ref points A, B, C, the longest pair is treated as the
+        diagonal.  The remaining point is therefore the corner shared by
+        the two shorter sides, which uniquely determines the 4th vertex.
         """
         rp = self.ref_points
         if len(rp) < 2:
@@ -984,28 +984,20 @@ class WaferDiagramWidget(QWidget):
         bx, by = rp[1]["x"], rp[1]["y"]
         cx, cy = rp[2]["x"], rp[2]["y"]
 
-        def area(u, v):
-            return abs(u[0] * v[1] - u[1] * v[0])
-
-        candidates = [
-            # (4th vertex,  draw order)
-            ((ax + bx - cx, ay + by - cy),
-             [(cx, cy), (ax, ay), (bx + ax - cx, by + ay - cy), (bx, by)]),
-            ((ax + cx - bx, ay + cy - by),
-             [(bx, by), (ax, ay), (ax + cx - bx, ay + cy - by), (cx, cy)]),
-            ((bx + cx - ax, by + cy - ay),
-             [(ax, ay), (bx, by), (bx + cx - ax, by + cy - ay), (cx, cy)]),
-        ]
-        best_order = candidates[0][1]
-        best_area = float("inf")
-        for (dx, dy), order in candidates:
-            u = (order[1][0] - order[0][0], order[1][1] - order[0][1])
-            v = (order[3][0] - order[0][0], order[3][1] - order[0][1])
-            a = area(u, v)
-            if a < best_area:
-                best_area = a
-                best_order = order
-        return best_order
+        points = [(ax, ay), (bx, by), (cx, cy)]
+        pairs = [(0, 1), (0, 2), (1, 2)]
+        diagonal = max(
+            pairs,
+            key=lambda pair: math.dist(points[pair[0]], points[pair[1]]),
+        )
+        corner_idx = next(i for i in range(3) if i not in diagonal)
+        corner = points[corner_idx]
+        diag_a, diag_b = (points[i] for i in diagonal)
+        fourth = (
+            diag_a[0] + diag_b[0] - corner[0],
+            diag_a[1] + diag_b[1] - corner[1],
+        )
+        return [corner, diag_a, fourth, diag_b]
 
     def _compute_layout(self):
         """Determine scale and world-centre from old-coord parallelogram."""
@@ -1026,28 +1018,36 @@ class WaferDiagramWidget(QWidget):
         self._cx = (min(p[0] for p in all_pts) + max(p[0] for p in all_pts)) / 2
         self._cy = (min(p[1] for p in all_pts) + max(p[1] for p in all_pts)) / 2
 
+        new_verts = [self._fwd(x, y) for x, y in verts]
+        new_verts = [point for point in new_verts if point is not None]
+        if len(new_verts) >= 2:
+            new_longest = max(
+                math.dist(new_verts[i], new_verts[(i + 1) % len(new_verts)])
+                for i in range(len(new_verts))
+            )
+            self._new_scale = (
+                self.TARGET_LONG_EDGE_PX / new_longest
+                if new_longest > 0 else self._scale
+            )
+        else:
+            self._new_scale = self._scale
+
     def _to_screen(self, x: float, y: float) -> QPointF:
         sx = -(x - self._cx) * self._scale + self.width() / 2
         sy = -(y - self._cy) * self._scale + self.height() / 2
         return QPointF(sx, sy)
 
     def _new_center(self) -> tuple[float, float] | None:
-        """Centroid of the transformed ref points in new-coord space.
+        """Image of the old diagram centre in new-coordinate space.
 
         The instruments share the same orientation; displacement merely
-        reflects coordinate zeroing.  By centering the new overlay on its
-        own centroid (same screen centre as the old overlay) we eliminate
-        translation and show only the rotational difference — which is what
-        actually matters for wafer-placement calibration.
+        reflects coordinate zeroing.  Mapping the old diagram centre through
+        the transform keeps the two overlays physically aligned while removing
+        the arbitrary translation between coordinate-system origins.
         """
         if len(self._new_filled) < 2:
             return None
-        pts = [self._fwd(rp["x"], rp["y"]) for rp in self.ref_points]
-        pts = [p for p in pts if p is not None]
-        if not pts:
-            return None
-        return (sum(p[0] for p in pts) / len(pts),
-                sum(p[1] for p in pts) / len(pts))
+        return self._fwd(self._cx, self._cy)
 
     def _to_screen_new(self, x_new: float, y_new: float) -> QPointF:
         """Map a new-system point to screen, centred at the same pixel as
@@ -1055,8 +1055,8 @@ class WaferDiagramWidget(QWidget):
         nc = self._new_center()
         if nc is None:
             return self._to_screen(x_new, y_new)
-        sx = -(x_new - nc[0]) * self._scale + self.width() / 2
-        sy = -(y_new - nc[1]) * self._scale + self.height() / 2
+        sx = -(x_new - nc[0]) * self._new_scale + self.width() / 2
+        sy = -(y_new - nc[1]) * self._new_scale + self.height() / 2
         return QPointF(sx, sy)
 
     # ── public API ────────────────────────────────────────────────────

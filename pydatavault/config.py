@@ -43,6 +43,7 @@ def get_pyflexlab_out_path() -> Path:
 ROOT_PATH = get_root_path()
 DB_DIR = ROOT_PATH / ".labdb"
 DB_FILE = DB_DIR / "lab.db"
+FLAKE_CALIBRATION_DB_FILE = DB_DIR / "flake_layer_calibrations.db"
 PROJECTS_DIR = ROOT_PATH / "projects"
 SHARED_DIR = ROOT_PATH / "shared"
 FLAKES_DIR = SHARED_DIR / "flakes"
