@@ -1221,20 +1221,21 @@ class WaferDiagramWidget(QWidget):
 
 
 class CoordTransformDialog(QDialog):
-    """Coordinate-system transformation dialog.
+    """Convert wafer-relative flake positions into target stage coordinates.
 
-    Displays the ref points stored for a wafer (up to 3).  The user types
-    the corresponding coordinates measured in the *new* coordinate system
-    (e.g. SEM stage) into the input fields on the right.
+    Stored reference and flake values form a coordinate chart attached to the
+    wafer (the original stage readings can serve as that chart without being
+    rewritten).  The user enters the same references' current absolute stage
+    coordinates, which define a rigid wafer-to-stage transform.
 
     Behaviour
     ---------
     * Inputs are QLineEdit so they can be left empty ("not yet measured").
-    * As soon as **2** slots are filled, a simple two-point transform is shown.
-    * When all **3** slots are filled, a full affine transform is used. This
-      handles axis reflection and non-uniform X/Y scaling.
-    * Selecting a flake from the combo box displays its transformed
-      new-system coordinates using the best available transform.
+    * Two or three references use a least-squares rigid fit and report
+      residuals when the measured distances are not perfectly consistent.
+    * The diagram shows only wafer-relative physical positions; its sign
+      reversal is drawing-only.
+    * The visible result is always an absolute target stage coordinate.
     * Nothing is written to the database — all results are temporary.
     """
 
@@ -1243,9 +1244,10 @@ class CoordTransformDialog(QDialog):
         super().__init__(parent)
         self.ref_points = ref_points
         self.flakes = flakes
+        self._wafer_ref_points = [dict(point) for point in ref_points]
+        self._wafer_flakes = [dict(flake) for flake in flakes]
         self.setWindowTitle("Coordinate Transform")
         self.setMinimumSize(980, 420)
-        self._fallback_warning_shown = False
         self._build_ui()
 
     # ------------------------------------------------------------------ #
@@ -1258,10 +1260,9 @@ class CoordTransformDialog(QDialog):
 
         # ── Left: wafer diagram ───────────────────────────────────────
         self._diagram = WaferDiagramWidget(
-            self.ref_points,
-            self.flakes,
+            self._wafer_ref_points,
+            self._wafer_flakes,
             self,
-            fallback_warning_callback=self._show_transform_fallback_warning,
         )
         self._diagram.setMinimumSize(380, 340)
         outer.addWidget(self._diagram, stretch=2)
@@ -1272,18 +1273,20 @@ class CoordTransformDialog(QDialog):
 
         # Ref-point input table
         right.addWidget(QLabel(
-            "<b>Reference Points</b> — enter new-system coordinates:"
+            "<b>Reference Points</b> — enter current absolute stage coordinates:"
         ))
         grid = QGridLayout()
         grid.setHorizontalSpacing(8)
-        for col, text in enumerate(["", "Old X", "Old Y", "→", "New X", "New Y"]):
+        for col, text in enumerate([
+            "", "Wafer X", "Wafer Y", "→", "Stage X", "Stage Y"
+        ]):
             lbl = QLabel(f"<b>{text}</b>" if text else "")
             lbl.setAlignment(Qt.AlignCenter)
             grid.addWidget(lbl, 0, col)
 
         self._new_x_edits: list[QLineEdit] = []
         self._new_y_edits: list[QLineEdit] = []
-        for i, rp in enumerate(self.ref_points):
+        for i, rp in enumerate(self._wafer_ref_points):
             grid.addWidget(QLabel(f"Ref {i + 1}"), i + 1, 0)
             grid.addWidget(QLabel(f"{rp.get('x', 0):.4f}"), i + 1, 1)
             grid.addWidget(QLabel(f"{rp.get('y', 0):.4f}"), i + 1, 2)
@@ -1320,10 +1323,11 @@ class CoordTransformDialog(QDialog):
         flake_row.addWidget(QLabel("Flake:"))
         self._flake_combo = QComboBox()
         self._flake_combo.addItem("— select —", None)
-        for fl in self.flakes:
+        for fl, wafer_fl in zip(self.flakes, self._wafer_flakes):
             label = (
                 f"{fl['flake_id']}  "
-                f"({fl.get('coord_x', 0):.3f}, {fl.get('coord_y', 0):.3f})"
+                f"({wafer_fl.get('coord_x', 0):.3f}, "
+                f"{wafer_fl.get('coord_y', 0):.3f}) wafer"
             )
             self._flake_combo.addItem(label, fl)
         self._flake_combo.currentIndexChanged.connect(self._on_flake_changed)
@@ -1364,39 +1368,16 @@ class CoordTransformDialog(QDialog):
         return result
 
     @staticmethod
-    def _fmt_transform(info: dict, label: str = "") -> str:
+    def _fmt_rigid_transform(info: dict, label: str = "") -> str:
         dx, dy = info["displacement"]
         prefix = f"{label}:  " if label else ""
         return (
             f"{prefix}"
-            f"dx = {dx:.4f},  dy = {dy:.4f},  "
-            f"θ = {info['rotation_deg']:.4f}°,  "
-            f"scale = {info['scale']:.6f}"
-        )
-
-    @staticmethod
-    def _fmt_affine_transform(info: dict, label: str = "") -> str:
-        a, b, c, d, e, f = info["coefficients"]
-        prefix = f"{label}:\n" if label else ""
-        return (
-            f"{prefix}"
-            f"x_new = {a:.6f}*x + {b:.6f}*y + {c:.4f}\n"
-            f"y_new = {d:.6f}*x + {e:.6f}*y + {f:.4f}\n"
-            f"scale_x = {info['scale_x']:.6f},  "
-            f"scale_y = {info['scale_y']:.6f},  "
-            f"det = {info['determinant']:.6f},  "
-            f"orientation = {info['orientation']}"
-        )
-
-    def _show_transform_fallback_warning(self, exc: Exception):
-        if self._fallback_warning_shown:
-            return
-        self._fallback_warning_shown = True
-        QMessageBox.warning(
-            self,
-            "Coordinate Transform Fallback",
-            "pyflexlab coordinate transform failed, so PyDataVault is using "
-            f"its local fallback calculation for this preview.\n\n{exc}",
+            f"wafer origin stage = ({dx:.4f}, {dy:.4f})\n"
+            f"rotation = {info['rotation_deg']:.4f}°  "
+            f"(positive is clockwise for stage +Y down)\n"
+            f"reference residual: RMS = {info['residual_rms']:.6f},  "
+            f"max = {info['residual_max']:.6f}"
         )
 
     # ------------------------------------------------------------------ #
@@ -1411,47 +1392,31 @@ class CoordTransformDialog(QDialog):
             self._params_label.setText(
                 "(fill in at least 2 reference points above)"
             )
-            self._diagram.set_new_transform([])
             self._update_flake_result(filled)
             return
 
-        old_of = lambda i: (
-            self.ref_points[i].get("x", 0),
-            self.ref_points[i].get("y", 0),
-        )
-
-        if len(filled) == 2:
-            i0, c0 = filled[0]
-            i1, c1 = filled[1]
-            info = coord_utils.compute_transform_info(
-                old_of(i0), c0, old_of(i1), c1
+        try:
+            info = coord_utils.compute_rigid_transform_info(
+                [
+                    (
+                        self._wafer_ref_points[i].get("x", 0),
+                        self._wafer_ref_points[i].get("y", 0),
+                    )
+                    for i, _coords in filled
+                ],
+                [coords for _i, coords in filled],
             )
-            text = self._fmt_transform(info, f"Ref {i0+1}+{i1+1}")
-
-        else:
-            i0, c0 = filled[0]
-            i1, c1 = filled[1]
-            i2, c2 = filled[2]
-            try:
-                info = coord_utils.compute_affine_transform_info(
-                    [old_of(i0), old_of(i1), old_of(i2)],
-                    [c0, c1, c2],
-                )
-                text = self._fmt_affine_transform(
-                    info,
-                    f"Affine Ref {i0+1}+{i1+1}+{i2+1}",
-                )
-            except Exception as exc:
-                text = f"Affine transform error: {exc}"
+            refs_label = "+".join(str(i + 1) for i, _coords in filled)
+            text = self._fmt_rigid_transform(info, f"Rigid Ref {refs_label}")
+        except Exception as exc:
+            text = f"Rigid transform error: {exc}"
 
         self._params_label.setText(text)
-        self._diagram.set_new_transform(filled)
         self._update_flake_result(filled)
 
     def _on_flake_changed(self, _index):
         coords = self._parse_new_coords()
         filled = [(i, c) for i, c in enumerate(coords) if c is not None]
-        self._diagram.set_new_transform(filled)
         self._update_flake_result(filled)
 
     def _update_flake_result(self, filled: list):
@@ -1464,32 +1429,23 @@ class CoordTransformDialog(QDialog):
                 "(establish a transform first — fill in at least 2 ref points)"
             )
             return
-        # Always use the first two filled points for the actual transform
-        old_of = lambda i: (
-            self.ref_points[i].get("x", 0),
-            self.ref_points[i].get("y", 0),
-        )
+        flake_wafer = (flake.get("coord_x", 0), flake.get("coord_y", 0))
         try:
-            if len(filled) >= 3:
-                refs = filled[:3]
-                nx, ny = coord_utils.affine_transition(
-                    [old_of(i) for i, _coords in refs],
-                    [coords for _i, coords in refs],
-                    (flake.get("coord_x", 0), flake.get("coord_y", 0)),
-                )
-            else:
-                i0, c0 = filled[0]
-                i1, c1 = filled[1]
-                nx, ny = coord_utils.coor_transition(
-                    old_of(i0), c0,
-                    old_of(i1), c1,
-                    (flake.get("coord_x", 0), flake.get("coord_y", 0)),
-                    on_fallback=self._show_transform_fallback_warning,
-                )
+            nx, ny = coord_utils.rigid_transition(
+                [
+                    (
+                        self._wafer_ref_points[i].get("x", 0),
+                        self._wafer_ref_points[i].get("y", 0),
+                    )
+                    for i, _coords in filled
+                ],
+                [coords for _i, coords in filled],
+                flake_wafer,
+            )
             self._flake_result_label.setText(
-                f"Old:  ({flake.get('coord_x', 0):.4f},  "
-                f"{flake.get('coord_y', 0):.4f})\n"
-                f"New:  ({nx:.4f},  {ny:.4f})"
+                f"Wafer coordinate:  ({flake_wafer[0]:.4f},  "
+                f"{flake_wafer[1]:.4f})\n"
+                f"Target Stage:  X = {nx:.4f},  Y = {ny:.4f}"
             )
         except Exception as exc:
             self._flake_result_label.setText(f"Transform error: {exc}")

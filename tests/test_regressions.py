@@ -1177,20 +1177,23 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         self.assertEqual(self.wafer_widget.WaferDiagramWidget.THUMB_W, 108)
         self.assertEqual(self.wafer_widget.WaferDiagramWidget.THUMB_H, 81)
 
-    def test_coordinate_diagram_reverses_x_only_for_drawing(self):
+    def test_coordinate_diagram_reverses_both_axes_only_for_drawing(self):
         diagram = self.wafer_widget.WaferDiagramWidget(
-            [{"x": -1.0, "y": 0.0}, {"x": 1.0, "y": 0.0}],
+            [{"x": -1.0, "y": -1.0}, {"x": 1.0, "y": 1.0}],
             [],
         )
         try:
             diagram.resize(400, 300)
             diagram._compute_layout()
-            left = diagram._to_screen(-1.0, 0.0)
-            right = diagram._to_screen(1.0, 0.0)
+            negative = diagram._to_screen(-1.0, -1.0)
+            positive = diagram._to_screen(1.0, 1.0)
 
-            self.assertGreater(left.x(), right.x())
+            self.assertGreater(negative.x(), positive.x())
+            self.assertGreater(negative.y(), positive.y())
             self.assertEqual(diagram.ref_points[0]["x"], -1.0)
+            self.assertEqual(diagram.ref_points[0]["y"], -1.0)
             self.assertEqual(diagram.ref_points[1]["x"], 1.0)
+            self.assertEqual(diagram.ref_points[1]["y"], 1.0)
         finally:
             diagram.close()
 
@@ -1251,29 +1254,15 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         finally:
             diagram.close()
 
-    def test_coordinate_transform_warns_when_pyflexlab_falls_back(self):
-        dialog = self.wafer_widget.CoordTransformDialog(
-            [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 0.0}],
-            [{"flake_uid": 1, "flake_id": "bf1", "coord_x": 0.5, "coord_y": 0.0}],
+    def test_rigid_transform_maps_wafer_coordinate_to_target_stage(self):
+        result = self.wafer_widget.coord_utils.rigid_transition(
+            refs_wafer=[(0.0, 10.0), (0.0, 0.0), (10.0, 0.0)],
+            refs_stage=[(30.0, 40.0), (40.0, 40.0), (40.0, 50.0)],
+            target_wafer=(1.0, 7.0),
         )
-        try:
-            dialog._new_x_edits[0].setText("0")
-            dialog._new_y_edits[0].setText("0")
-            dialog._new_x_edits[1].setText("1")
-            dialog._new_y_edits[1].setText("0")
 
-            with mock.patch.object(
-                self.wafer_widget.coord_utils,
-                "_pyflexlab_coor_transition",
-                side_effect=RuntimeError("pyflexlab failed"),
-                create=True,
-            ), mock.patch.object(self.wafer_widget.QMessageBox, "warning") as warning:
-                dialog._flake_combo.setCurrentIndex(1)
-
-            warning.assert_called_once()
-            self.assertIn("fallback", warning.call_args.args[2].lower())
-        finally:
-            dialog.close()
+        self.assertAlmostEqual(result[0], 33.0)
+        self.assertAlmostEqual(result[1], 41.0)
 
     def test_affine_transform_handles_reflected_y_axis_and_nonuniform_scale(self):
         result = self.wafer_widget.coord_utils.affine_transition(
@@ -1285,20 +1274,20 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         self.assertAlmostEqual(result[0], 108.0)
         self.assertAlmostEqual(result[1], 194.0)
 
-    def test_coordinate_transform_dialog_uses_three_point_affine_for_reflected_axes(self):
+    def test_coordinate_transform_dialog_returns_target_stage_from_wafer_coordinates(self):
         dialog = self.wafer_widget.CoordTransformDialog(
             [
+                {"x": 0.0, "y": 10.0},
                 {"x": 0.0, "y": 0.0},
                 {"x": 10.0, "y": 0.0},
-                {"x": 0.0, "y": 5.0},
             ],
-            [{"flake_uid": 1, "flake_id": "bf1", "coord_x": 4.0, "coord_y": 2.0}],
+            [{"flake_uid": 1, "flake_id": "bf1", "coord_x": 1.0, "coord_y": 7.0}],
         )
         try:
             values = [
-                ("100", "200"),
-                ("120", "200"),
-                ("100", "185"),
+                ("30", "40"),
+                ("40", "40"),
+                ("40", "50"),
             ]
             for idx, (x_value, y_value) in enumerate(values):
                 dialog._new_x_edits[idx].setText(x_value)
@@ -1306,7 +1295,10 @@ class PyDataVaultRegressionTests(unittest.TestCase):
 
             dialog._flake_combo.setCurrentIndex(1)
 
-            self.assertIn("New:  (108.0000,  194.0000)", dialog._flake_result_label.text())
+            self.assertIn("Wafer coordinate:  (1.0000,  7.0000)", dialog._flake_result_label.text())
+            self.assertIn("Target Stage:  X = 33.0000,  Y = 41.0000", dialog._flake_result_label.text())
+            self.assertIn("reference residual: RMS = 0.000000", dialog._params_label.text())
+            self.assertEqual(dialog._diagram._new_filled, [])
         finally:
             dialog.close()
 
@@ -1323,7 +1315,7 @@ class PyDataVaultRegressionTests(unittest.TestCase):
 
             dialog._flake_combo.setCurrentIndex(1)
 
-            self.assertIn("New:  (10.5000,  20.0000)", dialog._flake_result_label.text())
+            self.assertIn("Target Stage:  X = 10.5000,  Y = 20.0000", dialog._flake_result_label.text())
         finally:
             dialog.close()
 

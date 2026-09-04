@@ -85,6 +85,89 @@ def coor_transition(
     return (target_new.real, target_new.imag)
 
 
+def rigid_from_points(
+    refs_wafer: list[tuple[float, float]],
+    refs_stage: list[tuple[float, float]],
+) -> tuple[float, float, float, float]:
+    """Fit a rotation and translation from wafer-relative to stage coordinates.
+
+    Both coordinate systems use their numeric X/Y values directly.  The
+    fixed-microscope sign reversal belongs only to drawing and is deliberately
+    absent here.  With more than two references this is a least-squares rigid
+    fit, so measurement noise cannot introduce affine shear or nonuniform
+    scaling.
+
+    Returns ``(cos_theta, sin_theta, tx, ty)`` for::
+
+        x_stage = cos_theta*x_wafer - sin_theta*y_wafer + tx
+        y_stage = sin_theta*x_wafer + cos_theta*y_wafer + ty
+    """
+    if len(refs_wafer) != len(refs_stage) or len(refs_wafer) < 2:
+        raise ValueError("Rigid transform requires the same 2 or more reference points")
+
+    old = [complex(x, y) for x, y in refs_wafer]
+    new = [complex(x, y) for x, y in refs_stage]
+    old_center = sum(old) / len(old)
+    new_center = sum(new) / len(new)
+    covariance = sum(
+        (new_point - new_center) * (old_point - old_center).conjugate()
+        for old_point, new_point in zip(old, new)
+    )
+    if abs(covariance) < 1e-12:
+        raise ValueError("Reference points do not define a rotation")
+
+    rotation = covariance / abs(covariance)
+    translation = new_center - rotation * old_center
+    return (
+        rotation.real,
+        rotation.imag,
+        translation.real,
+        translation.imag,
+    )
+
+
+def apply_rigid(
+    transform: tuple[float, float, float, float],
+    target: tuple[float, float],
+) -> tuple[float, float]:
+    """Apply a wafer-relative to absolute-stage rigid transform."""
+    cos_theta, sin_theta, tx, ty = transform
+    x, y = target
+    return (
+        cos_theta * x - sin_theta * y + tx,
+        sin_theta * x + cos_theta * y + ty,
+    )
+
+
+def rigid_transition(
+    refs_wafer: list[tuple[float, float]],
+    refs_stage: list[tuple[float, float]],
+    target_wafer: tuple[float, float],
+) -> tuple[float, float]:
+    """Convert a wafer-relative target into an absolute stage coordinate."""
+    return apply_rigid(rigid_from_points(refs_wafer, refs_stage), target_wafer)
+
+
+def compute_rigid_transform_info(
+    refs_wafer: list[tuple[float, float]],
+    refs_stage: list[tuple[float, float]],
+) -> dict:
+    """Return rigid-fit parameters and reference residuals for display."""
+    transform = rigid_from_points(refs_wafer, refs_stage)
+    cos_theta, sin_theta, tx, ty = transform
+    residuals = [
+        math.dist(apply_rigid(transform, old), new)
+        for old, new in zip(refs_wafer, refs_stage)
+    ]
+    return {
+        "transform": transform,
+        "rotation_deg": math.degrees(math.atan2(sin_theta, cos_theta)),
+        "displacement": (tx, ty),
+        "residual_rms": math.sqrt(sum(value * value for value in residuals) / len(residuals)),
+        "residual_max": max(residuals),
+    }
+
+
 def affine_from_points(
     refs_old: list[tuple[float, float]],
     refs_new: list[tuple[float, float]],
