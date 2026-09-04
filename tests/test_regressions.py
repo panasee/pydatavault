@@ -1686,7 +1686,7 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         finally:
             widget.close()
 
-    def test_flake_buttons_replace_delete_with_edit_button(self):
+    def test_flake_buttons_include_edit_and_delete_actions(self):
         widget = self.wafer_widget.WaferWidget()
         try:
             button_texts = [
@@ -1695,7 +1695,7 @@ class PyDataVaultRegressionTests(unittest.TestCase):
             ]
 
             self.assertIn("Edit Flake", button_texts)
-            self.assertNotIn("Delete Flake", button_texts)
+            self.assertIn("Delete Flake", button_texts)
         finally:
             widget.close()
 

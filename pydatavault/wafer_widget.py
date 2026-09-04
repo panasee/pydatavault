@@ -1583,6 +1583,11 @@ class WaferWidget(QWidget):
         edit_flake_btn.clicked.connect(self.edit_flake)
         flake_btn_layout.addWidget(edit_flake_btn)
 
+        delete_flake_btn = QPushButton("Delete Flake")
+        style.decorate_button(delete_flake_btn, "danger", "delete")
+        delete_flake_btn.clicked.connect(self.delete_flake)
+        flake_btn_layout.addWidget(delete_flake_btn)
+
         view_photo_btn = QPushButton("View Photo")
         style.decorate_button(view_photo_btn, "utility", "photo")
         view_photo_btn.clicked.connect(self.view_photo)
