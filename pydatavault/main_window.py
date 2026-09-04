@@ -21,6 +21,7 @@ from . import database as db
 from . import style
 from .backup import create_backup
 from .flake_layer_tool import FlakeLayerAnalyzerDialog
+from .microscope_image_processor import MicroscopeImageProcessorDialog
 from .wafer_widget import WaferWidget
 from .project_widget import ProjectWidget
 
@@ -118,6 +119,12 @@ class MainWindow(QMainWindow):
         )
         flake_layer_action.triggered.connect(self._open_flake_layer_analyzer)
 
+        image_processor_action = self.tools_menu.addAction(
+            style.symbol_icon("photo"),
+            "Microscope Image Processor...",
+        )
+        image_processor_action.triggered.connect(self._open_microscope_image_processor)
+
         # Help menu
         help_menu = menubar.addMenu("Help")
 
@@ -179,6 +186,16 @@ class MainWindow(QMainWindow):
         if dialog is None:
             dialog = FlakeLayerAnalyzerDialog(self)
             self._flake_layer_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _open_microscope_image_processor(self):
+        """Open the independent image adjustment and RGB profile tool."""
+        dialog = getattr(self, "_microscope_image_processor_dialog", None)
+        if dialog is None:
+            dialog = MicroscopeImageProcessorDialog(self)
+            self._microscope_image_processor_dialog = dialog
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()

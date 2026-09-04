@@ -26,6 +26,9 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         cls.db = importlib.import_module("pydatavault.database")
         cls.main_window = importlib.import_module("pydatavault.main_window")
         cls.flake_layer_tool = importlib.import_module("pydatavault.flake_layer_tool")
+        cls.image_processor = importlib.import_module(
+            "pydatavault.microscope_image_processor"
+        )
         cls.wafer_widget = importlib.import_module("pydatavault.wafer_widget")
         cls.project_widget = importlib.import_module("pydatavault.project_widget")
         from PySide6.QtWidgets import QApplication
@@ -258,8 +261,114 @@ class PyDataVaultRegressionTests(unittest.TestCase):
             action_texts = [action.text() for action in window.tools_menu.actions()]
 
             self.assertIn("Flake Layer Analyzer...", action_texts)
+            self.assertIn("Microscope Image Processor...", action_texts)
         finally:
             window.close()
+
+    def test_image_processor_white_balance_neutralizes_reference_region(self):
+        rgb = self.image_processor.np.array(
+            [
+                [[120, 60, 30], [120, 60, 30]],
+                [[120, 60, 30], [120, 60, 30]],
+            ],
+            dtype=self.image_processor.np.uint8,
+        )
+
+        adjusted = self.image_processor.apply_image_adjustments(
+            rgb,
+            white_balance_rect=(0, 0, 2, 2),
+        )
+
+        self.assertLessEqual(int(adjusted[0, 0].max() - adjusted[0, 0].min()), 1)
+
+    def test_image_processor_auto_brightness_normalizes_reference_to_130(self):
+        rgb = self.image_processor.np.array(
+            [
+                [[120, 60, 30], [120, 60, 30]],
+                [[20, 40, 80], [20, 40, 80]],
+            ],
+            dtype=self.image_processor.np.uint8,
+        )
+
+        adjusted = self.image_processor.apply_image_adjustments(
+            rgb,
+            white_balance_rect=(0, 0, 2, 1),
+            auto_brightness_target=130,
+        )
+
+        self.assertLessEqual(abs(float(adjusted[0].mean()) - 130.0), 1.0)
+        self.assertLessEqual(int(adjusted[0, 0].max() - adjusted[0, 0].min()), 1)
+
+    def test_image_processor_rgb_profile_samples_selected_path(self):
+        rgb = self.image_processor.np.array(
+            [[[10, 20, 30], [40, 50, 60], [70, 80, 90]]],
+            dtype=self.image_processor.np.uint8,
+        )
+
+        distances, values = self.image_processor.sample_rgb_profile(
+            rgb,
+            (0.0, 0.0),
+            (2.0, 0.0),
+        )
+
+        self.assertEqual(distances.tolist(), [0.0, 1.0, 2.0])
+        self.assertEqual(values.tolist(), rgb[0].astype(float).tolist())
+
+    def test_image_processor_plotly_updates_use_independent_javascript_scope(self):
+        figure = self.image_processor.go.Figure()
+
+        script = self.image_processor.plotly_react_script(
+            figure,
+            {"responsive": True},
+        )
+
+        self.assertTrue(script.startswith("(() => {"))
+        self.assertTrue(script.endswith("})();"))
+        self.assertIn("Plotly.react('rgb-profile'", script)
+
+    def test_image_processor_qimage_round_trip_preserves_rgb(self):
+        source = self.flake_layer_tool.QImage(
+            2,
+            2,
+            self.flake_layer_tool.QImage.Format_RGB32,
+        )
+        source.fill(self.flake_layer_tool.QColor(12, 34, 56))
+
+        rgb = self.image_processor.qimage_to_rgb_array(source)
+        restored = self.image_processor.rgb_array_to_qimage(rgb)
+
+        self.assertEqual(restored.pixelColor(0, 0).getRgb()[:3], (12, 34, 56))
+
+    def test_image_processor_dialog_reprocesses_and_updates_profile(self):
+        dialog = self.image_processor.MicroscopeImageProcessorDialog()
+        try:
+            dialog.original_rgb = self.image_processor.np.full(
+                (8, 12, 3),
+                (20, 40, 60),
+                dtype=self.image_processor.np.uint8,
+            )
+            dialog.white_balance_rect = (0, 0, 4, 4)
+            dialog.profile_path = ((0.0, 0.0), (11.0, 0.0))
+
+            dialog._reprocess(fit=True)
+
+            self.assertFalse(dialog.processed_image.isNull())
+            self.assertTrue(dialog.auto_brightness_check.isChecked())
+            self.assertEqual(dialog.auto_brightness_target_spin.value(), 130)
+            self.assertEqual(dialog.profile_plot.values.shape, (12, 3))
+            figure = dialog.profile_plot._build_figure()
+            self.assertEqual([trace.name for trace in figure.data], ["R", "G", "B"])
+            self.assertEqual(tuple(figure.layout.yaxis.range), (0, 255))
+            self.assertTrue(dialog.profile_plot.CONFIG["scrollZoom"])
+            self.assertLessEqual(
+                int(
+                    dialog.processed_rgb[0, 0].max()
+                    - dialog.processed_rgb[0, 0].min()
+                ),
+                1,
+            )
+        finally:
+            dialog.close()
 
     def test_flake_layer_contrast_and_nearest_calibration(self):
         contrast = self.flake_layer_tool.rgb_optical_contrast(
