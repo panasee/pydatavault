@@ -275,11 +275,137 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         match, distance, margin = self.flake_layer_tool.nearest_calibration(
             contrast,
             entries,
+            (1.0, 1.0, 1.0),
         )
 
         self.assertEqual(match.layers, 1)
         self.assertAlmostEqual(distance, math.sqrt(3))
         self.assertGreater(margin, 0)
+
+    def test_flake_layer_learns_channel_weights_from_repeated_photos(self):
+        sample_type = self.flake_layer_tool.CalibrationSample
+        samples = []
+        layer_values = {
+            1: [(80.0, 70.0, 78.0), (80.1, 80.0, 80.0), (79.9, 60.0, 82.0)],
+            2: [(70.0, 60.0, 68.0), (70.1, 70.0, 70.0), (69.9, 50.0, 72.0)],
+        }
+        for layers, values in layer_values.items():
+            for photo_index, normalized_rgb in enumerate(values):
+                samples.append(
+                    sample_type(
+                        layers,
+                        normalized_rgb,
+                        f"layer-{layers}-photo-{photo_index}.png",
+                        (1.0, 1.0, 1.0),
+                        (1.0, 1.0, 1.0),
+                    )
+                )
+
+        weights = self.flake_layer_tool.calibration_channel_weights(samples)
+
+        self.assertAlmostEqual(sum(weights), 3.0)
+        self.assertGreater(weights[0], weights[2])
+        self.assertGreater(weights[2], weights[1])
+
+    def test_flake_layer_allows_one_calibrated_layer_with_limited_confidence(self):
+        sample_type = self.flake_layer_tool.CalibrationSample
+        samples = [
+            sample_type(
+                1,
+                normalized_rgb,
+                f"sha256:{photo_index:064x}",
+                (1.0, 1.0, 1.0),
+                (1.0, 1.0, 1.0),
+            )
+            for photo_index, normalized_rgb in enumerate(
+                [(80.0, 70.0, 90.0), (80.1, 72.0, 89.0), (79.9, 68.0, 91.0)],
+                start=1,
+            )
+        ]
+        entries = self.flake_layer_tool.calibration_centroids(samples)
+        weights = self.flake_layer_tool.calibration_channel_weights(samples)
+        match, distance, margin = self.flake_layer_tool.nearest_calibration(
+            entries[0].normalized_rgb,
+            entries,
+            weights,
+        )
+
+        confidence, reason = self.flake_layer_tool.calibration_confidence(
+            match,
+            distance,
+            margin,
+            weights,
+            samples,
+        )
+
+        self.assertEqual(match.layers, 1)
+        self.assertEqual(confidence, "Limited")
+        self.assertIn("other layer counts cannot be excluded", reason)
+
+    def test_flake_layer_marks_sample_outside_single_layer_spread_as_low_confidence(self):
+        sample_type = self.flake_layer_tool.CalibrationSample
+        samples = [
+            sample_type(
+                1,
+                normalized_rgb,
+                f"sha256:{photo_index:064x}",
+                (1.0, 1.0, 1.0),
+                (1.0, 1.0, 1.0),
+            )
+            for photo_index, normalized_rgb in enumerate(
+                [(80.0, 70.0, 90.0), (80.1, 70.1, 90.1), (79.9, 69.9, 89.9)],
+                start=1,
+            )
+        ]
+        entries = self.flake_layer_tool.calibration_centroids(samples)
+        weights = self.flake_layer_tool.calibration_channel_weights(samples)
+        match, distance, margin = self.flake_layer_tool.nearest_calibration(
+            (60.0, 50.0, 70.0),
+            entries,
+            weights,
+        )
+
+        confidence, reason = self.flake_layer_tool.calibration_confidence(
+            match,
+            distance,
+            margin,
+            weights,
+            samples,
+        )
+
+        self.assertEqual(confidence, "Low")
+        self.assertIn("uncalibrated layer count", reason)
+
+    def test_flake_layer_weighted_distance_uses_learned_channel_priority(self):
+        entries = [
+            self.flake_layer_tool.CalibrationEntry(1, (0.0, 10.0, 0.0)),
+            self.flake_layer_tool.CalibrationEntry(2, (8.0, 0.0, 0.0)),
+        ]
+
+        match, _distance, _margin = self.flake_layer_tool.nearest_calibration(
+            (0.0, 0.0, 0.0),
+            entries,
+            (2.8, 0.1, 0.1),
+        )
+
+        self.assertEqual(match.layers, 1)
+
+    def test_flake_layer_weight_learning_requires_three_photos_per_layer(self):
+        sample_type = self.flake_layer_tool.CalibrationSample
+        samples = [
+            sample_type(
+                layers,
+                (80.0 - layers, 80.0, 80.0),
+                f"layer-{layers}-photo-{photo}.png",
+                (1.0, 1.0, 1.0),
+                (1.0, 1.0, 1.0),
+            )
+            for layers in (1, 2)
+            for photo in (1, 2)
+        ]
+
+        with self.assertRaisesRegex(ValueError, "at least 3 different photos"):
+            self.flake_layer_tool.calibration_channel_weights(samples)
 
     def test_flake_layer_substrate_normalization_removes_channel_gain(self):
         normalized_a = self.flake_layer_tool.substrate_normalized_rgb(
@@ -356,6 +482,39 @@ class PyDataVaultRegressionTests(unittest.TestCase):
 
         self.assertEqual(store.get_samples(material_id), [sample])
 
+    def test_flake_layer_database_separates_same_material_on_different_substrates(self):
+        sample_type = self.flake_layer_tool.CalibrationSample
+        sample_285 = sample_type(
+            1,
+            (80.0, 70.0, 90.0),
+            "known-285.png",
+            (100.0, 80.0, 50.0),
+            (80.0, 56.0, 45.0),
+        )
+        sample_90 = sample_type(
+            1,
+            (75.0, 65.0, 85.0),
+            "known-90.png",
+            (100.0, 80.0, 100.0),
+            (75.0, 52.0, 85.0),
+        )
+        store_path = self.root_path / ".labdb" / "calibration-substrates.db"
+        if store_path.exists():
+            store_path.unlink()
+        store = self.flake_layer_tool.FlakeCalibrationStore(store_path)
+
+        material_285_id = store.save_calibration(
+            "Graphene", "285 nm SiO2/Si", [sample_285]
+        )
+        material_90_id = store.save_calibration(
+            "Graphene", "90 nm SiO2/Si", [sample_90]
+        )
+
+        self.assertNotEqual(material_285_id, material_90_id)
+        self.assertEqual(len(store.list_materials()), 2)
+        self.assertEqual(store.get_samples(material_285_id), [sample_285])
+        self.assertEqual(store.get_samples(material_90_id), [sample_90])
+
     def test_flake_layer_analyzer_selects_saved_material_from_dropdown(self):
         sample = self.flake_layer_tool.CalibrationSample(
             1,
@@ -427,10 +586,30 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         finally:
             editor.close()
 
+    def test_flake_layer_new_calibration_defaults_blank_substrate(self):
+        editor = self.flake_layer_tool.FlakeLayerAnalyzerDialog(
+            calibration_mode=True,
+        )
+        try:
+            self.assertEqual(editor.substrate_input.text(), "")
+            self.assertIn(
+                "285 nm SiO2/Si",
+                editor.substrate_input.placeholderText(),
+            )
+            self.assertEqual(editor._effective_substrate(), "285 nm SiO2/Si")
+        finally:
+            editor.close()
+
     def test_flake_layer_dialog_adds_current_region_without_manual_rgb_entry(self):
         dialog = self.flake_layer_tool.FlakeLayerAnalyzerDialog()
         try:
             dialog.image_path = Path("known-layers.png")
+            dialog.image = self.flake_layer_tool.QImage(
+                4,
+                4,
+                self.flake_layer_tool.QImage.Format_RGB32,
+            )
+            dialog.image.fill(self.flake_layer_tool.QColor(20, 30, 40))
             dialog.sample_values = {
                 "substrate": (100.0, 80.0, 50.0),
                 "flake": (80.0, 56.0, 45.0),
@@ -460,6 +639,29 @@ class PyDataVaultRegressionTests(unittest.TestCase):
             self.assertTrue(dialog.substrate_button.isChecked())
         finally:
             dialog.close()
+
+    def test_flake_layer_photo_identifier_uses_pixels_not_filename_or_path(self):
+        image_a = self.flake_layer_tool.QImage(
+            4,
+            4,
+            self.flake_layer_tool.QImage.Format_RGB32,
+        )
+        image_b = self.flake_layer_tool.QImage(
+            4,
+            4,
+            self.flake_layer_tool.QImage.Format_RGB32,
+        )
+        image_a.fill(self.flake_layer_tool.QColor(20, 30, 40))
+        image_b.fill(self.flake_layer_tool.QColor(20, 30, 40))
+
+        identifier_a = self.flake_layer_tool.image_content_identifier(image_a)
+        identifier_b = self.flake_layer_tool.image_content_identifier(image_b)
+        image_b.setPixelColor(0, 0, self.flake_layer_tool.QColor(21, 30, 40))
+        identifier_changed = self.flake_layer_tool.image_content_identifier(image_b)
+
+        self.assertEqual(identifier_a, identifier_b)
+        self.assertNotEqual(identifier_a, identifier_changed)
+        self.assertTrue(identifier_a.startswith("sha256:"))
 
     def test_flake_layer_image_sampling_uses_circular_roi(self):
         from PySide6.QtGui import QColor, QImage

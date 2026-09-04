@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,12 +42,29 @@ from . import style
 from .flake_calibration_store import CalibrationSample, FlakeCalibrationStore
 
 
+MIN_CALIBRATION_PHOTOS_PER_LAYER = 3
+MIN_CHANNEL_VARIANCE = 0.01
+DEFAULT_FLAKE_SUBSTRATE = "285 nm SiO2/Si"
+
+
 @dataclass(frozen=True)
 class CalibrationEntry:
     """One layer centroid in substrate-normalized RGB space."""
 
     layers: int
     normalized_rgb: tuple[float, float, float]
+
+
+def image_content_identifier(image: QImage) -> str:
+    """Return a path-independent identifier for the original image pixels."""
+    if image.isNull():
+        raise ValueError("No microscope image is loaded")
+    canonical = image.convertToFormat(QImage.Format_RGB32)
+    digest = hashlib.sha256()
+    for value in (canonical.width(), canonical.height(), canonical.bytesPerLine()):
+        digest.update(value.to_bytes(8, byteorder="little", signed=False))
+    digest.update(canonical.constBits().tobytes())
+    return f"sha256:{digest.hexdigest()}"
 
 
 def mean_rgb_in_circle(
@@ -141,17 +159,85 @@ def calibration_centroids(
     ]
 
 
+def calibration_channel_weights(
+    samples: list[CalibrationSample],
+) -> tuple[float, float, float]:
+    """Learn diagonal RGB precision weights from within-layer variation."""
+    grouped: dict[int, list[CalibrationSample]] = {}
+    for sample in samples:
+        grouped.setdefault(sample.layers, []).append(sample)
+
+    if not grouped:
+        raise ValueError("Add at least one known layer region")
+
+    insufficient = [
+        layers
+        for layers, layer_samples in sorted(grouped.items())
+        if len(
+            {
+                sample.source_image.removesuffix(" (cropped)")
+                for sample in layer_samples
+            }
+        )
+        < MIN_CALIBRATION_PHOTOS_PER_LAYER
+    ]
+    if insufficient:
+        layer_text = ", ".join(str(layers) for layers in insufficient)
+        raise ValueError(
+            f"Layer count(s) {layer_text} need regions from at least "
+            f"{MIN_CALIBRATION_PHOTOS_PER_LAYER} different photos to learn reliable "
+            "RGB channel weights"
+        )
+
+    sums_of_squares = [0.0, 0.0, 0.0]
+    degrees_of_freedom = 0
+    for layer_samples in grouped.values():
+        means = tuple(
+            sum(sample.normalized_rgb[channel] for sample in layer_samples)
+            / len(layer_samples)
+            for channel in range(3)
+        )
+        for sample in layer_samples:
+            for channel in range(3):
+                difference = sample.normalized_rgb[channel] - means[channel]
+                sums_of_squares[channel] += difference * difference
+        degrees_of_freedom += len(layer_samples) - 1
+
+    pooled_variances = tuple(
+        sum_of_squares / degrees_of_freedom
+        for sum_of_squares in sums_of_squares
+    )
+    precisions = tuple(
+        1.0 / max(variance, MIN_CHANNEL_VARIANCE)
+        for variance in pooled_variances
+    )
+    precision_sum = sum(precisions)
+    return tuple(3.0 * precision / precision_sum for precision in precisions)
+
+
 def nearest_calibration(
     measured: tuple[float, float, float],
     entries: list[CalibrationEntry],
+    channel_weights: tuple[float, float, float],
 ) -> tuple[CalibrationEntry, float, float | None]:
-    """Return nearest entry, RGB distance, and margin to the runner-up."""
+    """Return nearest entry using learned weighted RGB distance."""
     if not entries:
         raise ValueError("At least one calibration row is required")
+    if len(channel_weights) != 3 or any(
+        not math.isfinite(weight) or weight <= 0 for weight in channel_weights
+    ):
+        raise ValueError("RGB channel weights must contain three positive finite values")
 
     ranked = sorted(
         (
-            (math.dist(measured, entry.normalized_rgb), entry)
+            (
+                weighted_rgb_distance(
+                    measured,
+                    entry.normalized_rgb,
+                    channel_weights,
+                ),
+                entry,
+            )
             for entry in entries
         ),
         key=lambda item: item[0],
@@ -159,6 +245,75 @@ def nearest_calibration(
     best_distance, best_entry = ranked[0]
     margin = ranked[1][0] - best_distance if len(ranked) > 1 else None
     return best_entry, best_distance, margin
+
+
+def weighted_rgb_distance(
+    first: tuple[float, float, float],
+    second: tuple[float, float, float],
+    channel_weights: tuple[float, float, float],
+) -> float:
+    return math.sqrt(
+        sum(
+            weight * (value - reference) ** 2
+            for weight, value, reference in zip(channel_weights, first, second)
+        )
+    )
+
+
+def calibration_confidence(
+    entry: CalibrationEntry,
+    distance: float,
+    margin: float | None,
+    channel_weights: tuple[float, float, float],
+    samples: list[CalibrationSample],
+) -> tuple[str, str]:
+    """Return coverage-aware confidence guidance, not a probability."""
+    layer_samples = [sample for sample in samples if sample.layers == entry.layers]
+    training_distances = [
+        weighted_rgb_distance(
+            sample.normalized_rgb,
+            entry.normalized_rgb,
+            channel_weights,
+        )
+        for sample in layer_samples
+    ]
+    rms_radius = math.sqrt(
+        sum(training_distance ** 2 for training_distance in training_distances)
+        / len(training_distances)
+    )
+    acceptance_radius = max(3.0 * rms_radius, 0.5)
+    calibrated_layers = sorted({sample.layers for sample in samples})
+    photo_count = len(
+        {
+            sample.source_image.removesuffix(" (cropped)")
+            for sample in layer_samples
+        }
+    )
+
+    if distance > acceptance_radius:
+        return (
+            "Low",
+            f"outside the observed {entry.layers}-layer calibration spread; "
+            "this may be an uncalibrated layer count",
+        )
+    if len(calibrated_layers) == 1:
+        return (
+            "Limited",
+            f"resembles the only calibrated layer count ({entry.layers}); other "
+            "layer counts cannot be excluded",
+        )
+    if margin is not None and margin <= max(rms_radius, 0.25):
+        return (
+            "Low",
+            "the best and second-best calibrated layers are not well separated",
+        )
+    if len(calibrated_layers) >= 3 and photo_count >= 5:
+        return "High", "inside the calibrated spread with strong repeated-photo support"
+    return (
+        "Moderate",
+        f"inside the calibrated spread, but coverage is limited to "
+        f"{len(calibrated_layers)} layer counts and {photo_count} photos for this layer",
+    )
 
 
 def cropped_image(image: QImage, rect: QRectF) -> QImage:
@@ -423,7 +578,9 @@ class FlakeLayerAnalyzerDialog(QDialog):
         calibration_layout = QVBoxLayout(calibration_group)
         calibration_note = QLabel(
             "For each known photo: pick nearby bare substrate, pick a known layer region, "
-            "set the layer count below, then add it. You can combine several photos."
+            "set the layer count below, then add it. You may calibrate only the layer "
+            "counts you need, but each calibrated layer must appear in at least 3 "
+            "different photos so the model can learn RGB channel reliability."
         )
         calibration_note.setWordWrap(True)
         calibration_layout.addWidget(calibration_note)
@@ -432,7 +589,9 @@ class FlakeLayerAnalyzerDialog(QDialog):
         self.material_input = QLineEdit()
         self.material_input.setPlaceholderText("e.g. Graphene")
         self.substrate_input = QLineEdit()
-        self.substrate_input.setPlaceholderText("e.g. 285 nm SiO2/Si")
+        self.substrate_input.setPlaceholderText(
+            f"Default: {DEFAULT_FLAKE_SUBSTRATE}"
+        )
         profile_form.addRow("Material:", self.material_input)
         profile_form.addRow("Fixed substrate:", self.substrate_input)
         calibration_layout.addLayout(profile_form)
@@ -450,7 +609,7 @@ class FlakeLayerAnalyzerDialog(QDialog):
 
         self.calibration_table = QTableWidget(0, 5)
         self.calibration_table.setHorizontalHeaderLabels(
-            ["Photo", "Layers", "Norm R (%)", "Norm G (%)", "Norm B (%)"]
+            ["Photo ID", "Layers", "Norm R (%)", "Norm G (%)", "Norm B (%)"]
         )
         self.calibration_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.calibration_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -690,17 +849,18 @@ class FlakeLayerAnalyzerDialog(QDialog):
     def add_known_region(self) -> None:
         try:
             normalized = self._validated_current_normalized_rgb()
+            source_image = self.original_image
+            if source_image.isNull():
+                source_image = self.image
+            source_identifier = image_content_identifier(source_image)
         except ValueError as exc:
             QMessageBox.warning(self, "Cannot Add Known Region", str(exc))
             return
 
-        source_name = self.image_path.name if self.image_path is not None else "in-memory image"
-        if self.is_cropped:
-            source_name += " (cropped)"
         sample = CalibrationSample(
             self.known_layers_spin.value(),
             normalized,
-            source_name,
+            source_identifier,
             self.sample_values["substrate"],
             self.sample_values["flake"],
         )
@@ -748,9 +908,18 @@ class FlakeLayerAnalyzerDialog(QDialog):
     def estimate_layers(self) -> None:
         try:
             normalized = self._validated_current_normalized_rgb()
+            channel_weights = calibration_channel_weights(self.calibration_samples)
             entry, distance, margin = nearest_calibration(
                 normalized,
                 self.calibration_entries(),
+                channel_weights,
+            )
+            confidence, confidence_reason = calibration_confidence(
+                entry,
+                distance,
+                margin,
+                channel_weights,
+                self.calibration_samples,
             )
         except ValueError as exc:
             QMessageBox.warning(self, "Cannot Estimate Layer Count", str(exc))
@@ -764,10 +933,19 @@ class FlakeLayerAnalyzerDialog(QDialog):
         material = self.material_input.text().strip() or "unnamed material"
         substrate = self.substrate_input.text().strip()
         profile_name = f"{material} on {substrate}" if substrate else material
+        calibrated_layers = sorted({sample.layers for sample in self.calibration_samples})
+        calibrated_layer_text = ", ".join(str(layers) for layers in calibrated_layers)
+        weight_text = ", ".join(
+            f"{channel} {100.0 * weight / sum(channel_weights):.1f}%"
+            for channel, weight in zip("RGB", channel_weights)
+        )
         self.result_label.setText(
             f"{profile_name}: nearest calibration is {entry.layers} "
             f"layer{'s' if entry.layers != 1 else ''}. "
-            f"RGB distance: {distance:.3f} percentage points{margin_text}."
+            f"Weighted RGB distance: {distance:.3f} percentage points{margin_text}. "
+            f"Confidence: {confidence} ({confidence_reason}). "
+            f"Calibrated layer counts: {calibrated_layer_text}. "
+            f"Learned channel weights: {weight_text}."
         )
 
     def _load_calibration_material(self) -> None:
@@ -788,11 +966,15 @@ class FlakeLayerAnalyzerDialog(QDialog):
             f"Recalibrate {material['material_name']} — {material['substrate']}"
         )
 
+    def _effective_substrate(self) -> str:
+        return self.substrate_input.text().strip() or DEFAULT_FLAKE_SUBSTRATE
+
     def save_calibration_to_database(self) -> None:
         try:
+            channel_weights = calibration_channel_weights(self.calibration_samples)
             material_id = self.store.save_calibration(
                 self.material_input.text(),
-                self.substrate_input.text(),
+                self._effective_substrate(),
                 self.calibration_samples,
                 self.calibration_material_id,
             )
@@ -803,7 +985,11 @@ class FlakeLayerAnalyzerDialog(QDialog):
         QMessageBox.information(
             self,
             "Calibration Saved",
-            "The material calibration was saved to the local calibration database.",
+            "The calibration was saved. RGB weights learned from its samples: "
+            + ", ".join(
+                f"{channel}={100.0 * weight / sum(channel_weights):.1f}%"
+                for channel, weight in zip("RGB", channel_weights)
+            ),
         )
         self.accept()
 
