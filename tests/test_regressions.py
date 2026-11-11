@@ -2127,7 +2127,7 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         finally:
             widget.close()
 
-    def test_view_photo_rebases_managed_onedrive_path_to_current_root(self):
+    def test_view_photo_rebases_managed_path_to_current_root(self):
         box_id = self.db.create_box("Box View Rebased Photo")
         wafer = self.db.get_or_create_wafer(box_id, 0, 0)
         flake_uid = self.db.create_flake("bf-rebased", wafer["wafer_id"])
@@ -2136,8 +2136,7 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         photo_path = flake_dir / "bf.jpg"
         photo_path.write_bytes(b"fake image")
         old_machine_path = (
-            Path("C:/Users/Dongkai/OneDrive - Nanyang Technological University")
-            / "dongkai-db"
+            Path("C:/example/legacy-vault")
             / "shared"
             / "flakes"
             / str(flake_uid)
