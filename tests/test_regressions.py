@@ -2222,6 +2222,125 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         self.assertEqual(len(flakes), 1)
         self.assertEqual(flakes[0]["flake_id"], "bf1")
 
+    def test_wafer_context_delete_clears_clicked_wafer_and_refreshes(self):
+        box_id = self.db.create_box("Clear Wafer", rows=2, cols=2)
+        other = self.db.get_or_create_wafer(box_id, 0, 0)
+        target = self.db.get_or_create_wafer(box_id, 1, 1)
+        self.db.update_wafer(
+            target['wafer_id'], label="keep label", material="Graphene",
+            notes="keep notes", ref_points='[{"x":1,"y":2}]',
+        )
+        target = self.db.get_wafer_by_id(target['wafer_id'])
+        other_uid = self.db.create_flake("bf1", other['wafer_id'])
+        consumed_uid = self.db.create_flake("consumed", target['wafer_id'])
+        self.db.create_project("clear-project", "Clear Project")
+        self.db.create_device_with_layers(
+            "clear-device", "clear-project",
+            [{"layer_name": "channel", "flake_uid": consumed_uid}],
+        )
+        managed_dirs = []
+        for name in ("bf1", "bf2"):
+            uid = self.db.create_flake(name, target['wafer_id'])
+            directory = self.config.FLAKES_DIR / str(uid)
+            directory.mkdir(parents=True, exist_ok=True)
+            photo = directory / "photo.png"
+            photo.write_bytes(b"test photo")
+            self.db.update_flake(uid, photo_path=str(photo))
+            managed_dirs.append(directory)
+        external = self.root_path / "clear-external.png"
+        external.write_bytes(b"external original")
+        self.db.create_flake("external", target['wafer_id'], photo_path=str(external))
+
+        widget = self.wafer_widget.WaferWidget()
+        try:
+            widget.box_list.setCurrentRow(0)
+            widget.on_cell_clicked(0, 0)
+            grid = widget.grid_view
+            left, top, size = grid._grid_geometry()
+            position = self.wafer_widget.QPoint(
+                left + grid._label_width() + size + size // 2,
+                top + grid._label_height() + size + size // 2,
+            )
+            with mock.patch.object(self.wafer_widget, "QMenu") as menu_class, \
+                    mock.patch.object(self.wafer_widget.QMessageBox, "question") as question, \
+                    mock.patch.object(self.wafer_widget.QMessageBox, "critical") as error:
+                menu = menu_class.return_value
+                menu.exec.return_value = menu.addAction.return_value
+                grid.customContextMenuRequested.emit(position)
+                menu.addAction.assert_called_once_with("删除")
+                question.assert_not_called()
+                error.assert_not_called()
+
+            self.assertEqual(self.db.get_flakes_for_wafer(target['wafer_id']), [])
+            self.assertEqual(self.db.get_wafer_by_id(target['wafer_id']), target)
+            self.assertIsNotNone(self.db.get_flake(other_uid))
+            self.assertIsNotNone(self.db.get_flake(consumed_uid))
+            self.assertEqual(
+                self.db.get_device_layers("clear-device")[0]['flake_uid'], consumed_uid
+            )
+            self.assertTrue(external.exists())
+            self.assertTrue(all(not directory.exists() for directory in managed_dirs))
+            self.assertEqual(widget.current_wafer_id, target['wafer_id'])
+            self.assertEqual(widget.flake_table.rowCount(), 0)
+            self.assertEqual(grid.selected_cell, (1, 1))
+            self.assertEqual(grid._cell_display_info(1, 1), (0, "Graphene"))
+            self.assertEqual(grid._cell_display_info(0, 0)[0], 1)
+        finally:
+            widget.close()
+
+    def test_wafer_context_menu_cancel_empty_and_outside_do_not_delete(self):
+        box_id = self.db.create_box("Clear Cancel", rows=2, cols=2)
+        wafer = self.db.get_or_create_wafer(box_id, 0, 0)
+        uid = self.db.create_flake("bf1", wafer['wafer_id'])
+        self.db.get_or_create_wafer(box_id, 0, 1)
+        widget = self.wafer_widget.WaferWidget()
+        try:
+            widget.box_list.setCurrentRow(0)
+            grid = widget.grid_view
+            left, top, size = grid._grid_geometry()
+            position = self.wafer_widget.QPoint(
+                left + grid._label_width() + size // 2,
+                top + grid._label_height() + size // 2,
+            )
+            with mock.patch.object(self.wafer_widget, "QMenu") as menu_class:
+                menu = menu_class.return_value
+                menu.exec.return_value = None
+                grid.customContextMenuRequested.emit(position)
+                self.assertIsNotNone(self.db.get_flake(uid))
+                menu.addAction.return_value.setEnabled.assert_called_with(True)
+                position.setX(position.x() + size)
+                grid.customContextMenuRequested.emit(position)
+                menu.addAction.return_value.setEnabled.assert_called_with(False)
+                menu_class.reset_mock()
+                for invalid in (
+                    self.wafer_widget.QPoint(-1, -1),
+                    self.wafer_widget.QPoint(left, top),
+                    self.wafer_widget.QPoint(grid.width() + 1, grid.height() + 1),
+                    self.wafer_widget.QPoint(position.x(), position.y() + size),
+                ):
+                    grid.customContextMenuRequested.emit(invalid)
+                menu_class.assert_not_called()
+            self.assertEqual(len(self.db.get_wafers_for_box(box_id)), 2)
+            self.assertIsNotNone(self.db.get_flake(uid))
+        finally:
+            widget.close()
+
+    def test_delete_wafer_flakes_rolls_back_all_rows_on_failure(self):
+        box_id = self.db.create_box("Clear Rollback")
+        wafer = self.db.get_or_create_wafer(box_id, 0, 0)
+        for name in ("first", "second"):
+            self.db.create_flake(name, wafer['wafer_id'])
+        before = self.db.get_flakes_for_wafer(wafer['wafer_id'])
+        with self.db.get_conn() as conn:
+            conn.execute("""
+                CREATE TRIGGER fail_clear BEFORE DELETE ON flakes
+                WHEN OLD.flake_id = 'second'
+                BEGIN SELECT RAISE(ABORT, 'test deletion failure'); END
+            """)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "test deletion failure"):
+            self.db.delete_flakes_for_wafer(wafer['wafer_id'])
+        self.assertEqual(self.db.get_flakes_for_wafer(wafer['wafer_id']), before)
+
     def test_delete_flake_refreshes_by_current_wafer_without_selected_grid_cell(self):
         box_id = self.db.create_box("Box Delete Flake")
         wafer = self.db.get_or_create_wafer(box_id, 0, 0)

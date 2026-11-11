@@ -704,6 +704,17 @@ def delete_flake(flake_uid: int):
         conn.execute("DELETE FROM flakes WHERE flake_uid=?", (flake_uid,))
 
 
+def delete_flakes_for_wafer(wafer_id: int) -> list[dict]:
+    """Delete all flakes on a wafer atomically and return them for file cleanup."""
+    with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        flakes = conn.execute(
+            "SELECT * FROM flakes WHERE wafer_id=?", (wafer_id,)
+        ).fetchall()
+        conn.execute("DELETE FROM flakes WHERE wafer_id=?", (wafer_id,))
+        return flakes
+
+
 # ── Project CRUD ────────────────────────────────────────────────────────
 
 def create_project(project_id: str, name: str, description: str = "") -> str:

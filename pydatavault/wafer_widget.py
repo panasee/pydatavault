@@ -254,27 +254,34 @@ class WaferGridView(QWidget):
 
     def mousePressEvent(self, event):
         """Handle cell clicks."""
+        cell = self.cell_at(event.pos())
+        if cell is not None:
+            self.cell_clicked.emit(*cell)
+            self.set_selected_cell(*cell)
+
+    def cell_at(self, position: QPoint) -> tuple[int, int] | None:
+        """Return the unblocked grid cell at a widget-local position."""
         if self.rows == 0 or self.cols == 0:
-            return
+            return None
 
         left, top, cell_size = self._grid_geometry()
         label_width = self._label_width()
         label_height = self._label_height()
 
-        x = event.pos().x() - left - label_width
-        y = event.pos().y() - top - label_height
+        x = position.x() - left - label_width
+        y = position.y() - top - label_height
 
         if x < 0 or y < 0:
-            return
+            return None
 
         col = x // cell_size
         row = y // cell_size
 
         if 0 <= row < self.rows and 0 <= col < self.cols:
             if (row, col) in self.blocked_cells:
-                return
-            self.cell_clicked.emit(row, col)
-            self.set_selected_cell(row, col)
+                return None
+            return row, col
+        return None
 
     def paintEvent(self, event):
         """Paint the wafer grid."""
@@ -1512,6 +1519,8 @@ class WaferWidget(QWidget):
         center_layout.addWidget(grid_title, 0, Qt.AlignTop)
         self.grid_view = WaferGridView()
         self.grid_view.cell_clicked.connect(self.on_cell_clicked)
+        self.grid_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.grid_view.customContextMenuRequested.connect(self.show_wafer_context_menu)
         center_layout.addWidget(self.grid_view, 1)
         center_widget = QWidget()
         style.decorate_panel(center_widget, "gridPanel")
@@ -1679,6 +1688,42 @@ class WaferWidget(QWidget):
             self.load_ref_points(wafer)
         except Exception as e:
             QMessageBox.critical(self, "Database Error", f"Failed to load wafer: {str(e)}")
+
+    def show_wafer_context_menu(self, position: QPoint):
+        """Clear flakes from the wafer under the cursor, independent of selection."""
+        cell = self.grid_view.cell_at(position)
+        if self.current_box_id is None or cell is None:
+            return
+
+        try:
+            wafer = next(
+                (w for w in db.get_wafers_for_box(self.current_box_id)
+                 if (w['row'], w['col']) == cell),
+                None,
+            )
+            if wafer is None:
+                return
+
+            self.current_wafer_id = wafer['wafer_id']
+            self.grid_view.set_selected_cell(*cell)
+            self.load_flakes_for_wafer(wafer)
+            self.load_ref_points(wafer)
+
+            menu = QMenu(self)
+            delete_action = menu.addAction("删除")
+            delete_action.setEnabled(bool(db.get_flakes_for_wafer(wafer['wafer_id'])))
+            if menu.exec(self.grid_view.mapToGlobal(position)) != delete_action:
+                return
+
+            flakes = db.delete_flakes_for_wafer(wafer['wafer_id'])
+            for flake in flakes:
+                self._delete_managed_flake_files(flake['flake_uid'], flake)
+            self.load_flakes_for_wafer(wafer)
+            self.load_grid()
+            self.grid_view.set_selected_cell(*cell)
+        except Exception as exc:
+            logger.exception("Failed to clear wafer flakes")
+            QMessageBox.critical(self, "Database Error", f"Failed to clear wafer flakes: {exc}")
 
     def edit_wafer_metadata(self):
         """Open a dialog for editing the selected wafer's label and notes."""
