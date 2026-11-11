@@ -68,7 +68,7 @@ $VAULT_DB_PATH/
 │       ├── fabrication/
 │       │   └── <device-id>/    ← assembly photos, consumed flake data
 │       ├── measurements/
-│       │   └── <device-id> ──→ $PYLAB_DB_OUT/<device-id>   (symlink)
+│       │   └── <device-id> ──→ $PYLAB_DB_OUT/<device-id>   (symlink; junction fallback on Windows)
 │       ├── analysis/
 │       ├── reports/
 │       └── cad/

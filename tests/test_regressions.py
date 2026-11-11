@@ -2898,6 +2898,102 @@ class PyDataVaultRegressionTests(unittest.TestCase):
 
         self.assertIsNone(self.db.get_device("device-fail"))
 
+    @unittest.skipUnless(os.name == "nt", "Windows junctions")
+    def test_device_junction_create_rename_delete_preserves_measurements(self):
+        from pydatavault.directory_links import is_junction
+
+        project_id = "proj-junction"
+        self.db.create_project(project_id, "Project Junction")
+        measurement_root = self.root_path / "junction-measurements"
+        measurement_root.mkdir()
+        target = measurement_root / "device-old"
+        link_root = self.config.PROJECTS_DIR / project_id / "measurements"
+        dialog = self.project_widget.NewDeviceDialog(project_id)
+        dialog.device_id_edit.setText("device-old")
+        error = OSError("Missing symlink privilege")
+        error.winerror = 1314
+
+        def initialize_measurements(device_id):
+            folder = measurement_root / device_id
+            folder.mkdir()
+            (folder / "data.csv").write_text("measurement data")
+
+        widget = self.project_widget.ProjectWidget()
+        try:
+            with mock.patch.object(self.config, "PYFLEXLAB_OUT_PATH", measurement_root), \
+                 mock.patch("pyflexlab.file_organizer.FileOrganizer", side_effect=initialize_measurements), \
+                 mock.patch.object(self.project_widget.os, "symlink", side_effect=error), \
+                 mock.patch.object(self.project_widget.QMessageBox, "warning") as warning, \
+                 mock.patch.object(self.project_widget.QMessageBox, "critical") as critical, \
+                 mock.patch.object(self.project_widget.QMessageBox, "information"), \
+                 mock.patch.object(self.project_widget.QMessageBox, "question", return_value=self.project_widget.QMessageBox.Yes):
+                dialog.accept()
+                self.assertEqual(dialog.result(), self.project_widget.QDialog.Accepted)
+                self.assertEqual(self.db.get_device("device-old")["meas_path"], str(target))
+                self.assertTrue(is_junction(link_root / "device-old"))
+                self.assertEqual((link_root / "device-old" / "data.csv").read_text(), "measurement data")
+
+                widget.current_project_id = project_id
+                widget.load_devices(project_id)
+                widget.device_table.item(0, 0).setText("device-new")
+                self.assertIsNone(self.db.get_device("device-old"))
+                self.assertIsNotNone(self.db.get_device("device-new"))
+                self.assertFalse(is_junction(link_root / "device-old"))
+                self.assertTrue(is_junction(link_root / "device-new"))
+                self.assertEqual((link_root / "device-new" / "data.csv").read_text(), "measurement data")
+
+                widget.device_table.selectRow(0)
+                widget.on_delete_device()
+                self.assertIsNone(self.db.get_device("device-new"))
+                self.assertFalse(is_junction(link_root / "device-new"))
+                self.assertEqual((measurement_root / "device-new" / "data.csv").read_text(), "measurement data")
+                warning.assert_not_called()
+                critical.assert_not_called()
+        finally:
+            dialog.close()
+            widget.close()
+
+    def test_new_device_keeps_record_and_warns_when_link_creation_fails(self):
+        self.db.create_project("proj-link-failed", "Link Failed")
+        dialog = self.project_widget.NewDeviceDialog("proj-link-failed")
+        dialog.device_id_edit.setText("device-link-failed")
+        try:
+            with mock.patch("pyflexlab.file_organizer.FileOrganizer"), \
+                 mock.patch.object(self.project_widget, "create_directory_link", side_effect=PermissionError("Access denied")), \
+                 mock.patch.object(self.project_widget.QMessageBox, "warning") as warning, \
+                 mock.patch.object(self.project_widget.QMessageBox, "critical") as critical:
+                dialog.accept()
+            self.assertIsNotNone(self.db.get_device("device-link-failed"))
+            self.assertEqual(dialog.result(), self.project_widget.QDialog.Accepted)
+            warning.assert_called_once()
+            self.assertIn("Open Meas Folder", warning.call_args.args[2])
+            critical.assert_not_called()
+        finally:
+            dialog.close()
+
+    @unittest.skipUnless(os.name == "nt", "Windows junctions")
+    def test_backup_preserves_junction_without_traversing_measurement_data(self):
+        import _winapi
+        backup = importlib.import_module("pydatavault.backup")
+        root = self.root_path / "junction-backup"
+        root.mkdir()
+        target = self.root_path / "junction-backup-data"
+        target.mkdir()
+        (target / "data.csv").write_text("measurement data")
+        link = root / "device"
+        _winapi.CreateJunction(str(target), str(link))
+        archive = self.root_path / "junction-backup.tar"
+        try:
+            with tarfile.open(archive, "w") as tar:
+                backup._add_tree(tar, root, "vault")
+            with tarfile.open(archive) as tar:
+                self.assertEqual(tar.getnames(), ["vault/device"])
+                member = tar.getmember("vault/device")
+                self.assertTrue(member.issym())
+                self.assertEqual(member.linkname, str(target.resolve()))
+        finally:
+            link.rmdir()
+
     def test_new_device_dialog_writes_used_flake_index(self):
         box_id = self.db.create_box("Box Device Index")
         wafer = self.db.get_or_create_wafer(box_id, 0, 0)

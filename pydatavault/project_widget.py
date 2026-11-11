@@ -20,6 +20,7 @@ from PySide6.QtCore import QSize
 from . import database as db
 from . import config
 from . import style
+from .directory_links import create_directory_link, is_junction, remove_directory_link
 
 logger = logging.getLogger("PyOmnix")
 
@@ -647,18 +648,17 @@ class ProjectWidget(QWidget):
             (old_meas_target, new_meas_target),
             (old_meas_link, new_meas_link),
         ):
-            if (old_path.exists() or old_path.is_symlink()) and (
-                new_path.exists() or new_path.is_symlink()
+            if (old_path.exists() or old_path.is_symlink() or is_junction(old_path)) and (
+                new_path.exists() or new_path.is_symlink() or is_junction(new_path)
             ):
                 raise FileExistsError(f"Target path already exists: {new_path}")
 
         ProjectWidget._rename_path_if_present(old_fab, new_fab)
         ProjectWidget._rename_path_if_present(old_meas_target, new_meas_target)
 
-        if old_meas_link.is_symlink():
-            new_meas_link.parent.mkdir(parents=True, exist_ok=True)
-            old_meas_link.unlink()
-            os.symlink(new_meas_target, new_meas_link, target_is_directory=True)
+        if old_meas_link.is_symlink() or is_junction(old_meas_link):
+            create_directory_link(new_meas_target, new_meas_link)
+            remove_directory_link(old_meas_link)
         else:
             ProjectWidget._rename_path_if_present(old_meas_link, new_meas_link)
 
@@ -905,8 +905,8 @@ class ProjectWidget(QWidget):
                     ProjectWidget._remove_directory_best_effort(fab_dir)
 
                 meas_link = config.PROJECTS_DIR / self.current_project_id / "measurements" / device_id
-                if meas_link.exists() or meas_link.is_symlink():
-                    meas_link.unlink()
+                if meas_link.exists() or meas_link.is_symlink() or is_junction(meas_link):
+                    remove_directory_link(meas_link)
 
                 db.delete_device(device_id)
                 self.load_devices(self.current_project_id)
@@ -1256,15 +1256,15 @@ class NewDeviceDialog(QDialog):
             )
             ProjectWidget.write_used_flakes_index(self.project_id, device_id, self.layers)
 
-            # Symlink from project tree → pyflexlab data directory
+            # Link from project tree to pyflexlab data (junction fallback on Windows).
             meas_link = config.PROJECTS_DIR / self.project_id / "measurements" / device_id
             try:
-                os.symlink(meas_target, meas_link, target_is_directory=True)
+                create_directory_link(meas_target, meas_link)
             except OSError as e:
-                QMessageBox.warning(self, "Symlink Warning",
-                    f"Could not create symlink to measurement folder:\n{e}\n\n"
+                QMessageBox.warning(self, "Measurement Folder Link Warning",
+                    f"Could not create a link to the measurement folder:\n{e}\n\n"
                     "The device was created and the measurement folder exists, "
-                    "but you will need to navigate to it manually."
+                    "and you can still use Open Meas Folder to access it."
                 )
 
             super().accept()

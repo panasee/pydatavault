@@ -12,6 +12,7 @@ from pathlib import Path
 import zstandard
 
 from . import config
+from .directory_links import is_junction
 
 
 def create_backup(destination_dir: str | Path, timestamp: str | None = None) -> Path:
@@ -105,12 +106,22 @@ def _add_tree(
     skip_paths = skip_paths or set()
     if not root.exists():
         return
-    for path in sorted(root.rglob("*")):
+    for path in sorted(root.iterdir()):
         resolved = path.resolve()
         if resolved in skip_paths:
             continue
         arcname = Path(arc_root) / path.relative_to(root)
-        tar.add(path, arcname=str(arcname), recursive=False)
+        if is_junction(path):
+            # tar has no junction type; preserve it as a directory symlink.
+            # Never traverse it and duplicate external measurement data.
+            info = tarfile.TarInfo(arcname.as_posix())
+            info.type = tarfile.SYMTYPE
+            info.linkname = str(resolved)
+            tar.addfile(info)
+        else:
+            tar.add(path, arcname=str(arcname), recursive=False)
+            if path.is_dir() and not path.is_symlink():
+                _add_tree(tar, path, arcname.as_posix(), skip_paths)
 
 
 class _BytesReader:
