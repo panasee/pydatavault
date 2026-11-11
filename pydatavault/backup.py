@@ -47,17 +47,23 @@ def create_backup(destination_dir: str | Path, timestamp: str | None = None) -> 
 
     with tempfile.TemporaryDirectory(prefix="pydatavault-backup-") as tmp_name:
         tmp_dir = Path(tmp_name)
-        db_snapshot = tmp_dir / "lab.db"
-        _snapshot_sqlite_db(config.DB_FILE, db_snapshot)
+        databases = [config.DB_FILE, config.FLAKE_CALIBRATION_DB_FILE, config.FLAKE_PHOTO_DB_FILE]
+        snapshots = [(source, tmp_dir / source.name) for source in databases]
+        for source, snapshot in snapshots:
+            _snapshot_sqlite_db(source, snapshot)
+        skip_paths = {source.resolve() for source in databases}
+        skip_paths.update(Path(str(source) + suffix).resolve()
+                          for source in databases for suffix in ("-wal", "-shm", "-journal"))
 
         with archive_path.open("wb") as raw:
             compressor = zstandard.ZstdCompressor(level=10, threads=-1)
             with compressor.stream_writer(raw) as compressed:
                 with tarfile.open(fileobj=compressed, mode="w|") as tar:
                     _add_json(tar, "manifest.json", manifest)
-                    _add_tree(tar, vault_root, "vault", skip_paths={config.DB_FILE.resolve()})
-                    if db_snapshot.exists():
-                        tar.add(db_snapshot, arcname="vault/.labdb/lab.db")
+                    _add_tree(tar, vault_root, "vault", skip_paths=skip_paths)
+                    for source, snapshot in snapshots:
+                        if snapshot.exists():
+                            tar.add(snapshot, arcname=f"vault/.labdb/{source.name}")
                     if pyflexlab_root.exists():
                         _add_tree(tar, pyflexlab_root, "pyflexlab_out")
 

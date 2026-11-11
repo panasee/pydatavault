@@ -9,6 +9,7 @@ description = "GUI application for managing heterojunction fabrication and measu
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
+    "Pillow>=10.0",
     "plotly>=6.0",
     "PySide6>=6.5",
     "pyflexlab",
@@ -18,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 pydatavault = "pydatavault.__main__:main"
+pydatavault-flake-api = "pydatavault.flake_api:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -921,6 +921,53 @@ class PyDataVaultRegressionTests(unittest.TestCase):
         self.assertIn("pyflexlab_out/dev/measurement.csv", names)
         self.assertFalse(any(str(self.root_path) in name for name in names))
 
+    def test_backup_snapshots_photo_library_with_live_wal_and_original_bytes(self):
+        from pydatavault.flake_photo_store import FlakePhotoStore
+        from pydatavault.flake_analysis import FlakeAnalysisService
+        from pydatavault.flake_imaging import decode_image
+        import numpy as np
+        import zstandard
+        backup = importlib.import_module("pydatavault.backup")
+        store = FlakePhotoStore(self.config.FLAKE_PHOTO_DB_FILE)
+        profile_id = store.ensure_profile("Graphene", "285 nm oxide", "50x")
+        image = self.flake_layer_tool.QImage(30, 30, self.flake_layer_tool.QImage.Format_RGB32)
+        image.fill(self.flake_layer_tool.QColor(150, 180, 200))
+        original_path = self.root_path / "backup-original.png"
+        image.save(str(original_path))
+        original = original_path.read_bytes()
+        rgb = decode_image(original)
+        labels = np.zeros(rgb.shape[:2], dtype=np.int32)
+        labels[10:20, 10:20] = 1
+        background = labels == 0
+        with sqlite3.connect(store.path) as live:
+            live.execute("PRAGMA journal_mode=WAL")
+            live.execute("PRAGMA wal_autocheckpoint=0")
+            photo_id = store.save_photo(profile_id, original, original_path.name, labels, background,
+                                       {1: {"layers": 1, "provenance": "AFM"}})
+            for value in (151, 152):
+                image.setPixelColor(1, 1, self.flake_layer_tool.QColor(value, 180, 200))
+                image.save(str(original_path))
+                store.save_photo(profile_id, original_path.read_bytes(), original_path.name, labels, background,
+                                 {1: {"layers": 1, "provenance": "AFM"}})
+            trained = FlakeAnalysisService(store=store).train(profile_id)
+            destination = self.root_path.parent / f"photo-backups-{uuid4().hex}"
+            with mock.patch.object(backup.config, "PYFLEXLAB_OUT_PATH", self.root_path / "unused-output"):
+                archive = backup.create_backup(destination)
+            restored_path = destination / "restored-photos.db"
+            with archive.open("rb") as raw, zstandard.ZstdDecompressor().stream_reader(raw) as reader:
+                with tarfile.open(fileobj=reader, mode="r|") as tar:
+                    names = []
+                    for member in tar:
+                        names.append(member.name)
+                        if member.name == "vault/.labdb/flake_photo_library.db":
+                            restored_path.write_bytes(tar.extractfile(member).read())
+            self.assertFalse(any(name.endswith(("-wal", "-shm", "-journal")) for name in names))
+            restored_store = FlakePhotoStore(restored_path)
+            restored = restored_store.load_photo(photo_id)
+            self.assertEqual(restored["original"], original)
+            np.testing.assert_array_equal(restored["labels"], labels)
+            self.assertEqual(restored_store.get_model(profile_id), trained)
+
     def test_device_display_order_persists_in_preferences_without_db_column(self):
         self.db.create_project("proj-display-order", "Project Display Order")
         for device_id in ("device-a", "device-b", "device-c"):

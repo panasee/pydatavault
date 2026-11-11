@@ -119,6 +119,9 @@ class MainWindow(QMainWindow):
         )
         flake_layer_action.triggered.connect(self._open_flake_layer_analyzer)
 
+        photo_library_action = self.tools_menu.addAction("Flake Photo Library...")
+        photo_library_action.triggered.connect(self._open_flake_photo_library)
+
         image_processor_action = self.tools_menu.addAction(
             style.symbol_icon("photo"),
             "Microscope Image Processor...",
@@ -196,6 +199,16 @@ class MainWindow(QMainWindow):
         if dialog is None:
             dialog = MicroscopeImageProcessorDialog(self)
             self._microscope_image_processor_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _open_flake_photo_library(self):
+        from .flake_photo_widget import FlakePhotoLibraryDialog
+        dialog = getattr(self, "_flake_photo_library_dialog", None)
+        if dialog is None:
+            dialog = FlakePhotoLibraryDialog(self)
+            self._flake_photo_library_dialog = dialog
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
